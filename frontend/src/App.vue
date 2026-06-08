@@ -45,6 +45,9 @@
       </router-view>
     </main>
 
+    <!-- 全局任务队列悬浮面板（路由切换时不销毁） -->
+    <TaskQueuePanel />
+
     <!-- 页脚 -->
     <footer class="app-footer">
       <span>© Agnes AI Platform · 基于 Vue 3 + FastAPI 构建</span>
@@ -54,6 +57,7 @@
 
 <script setup>
 import { Picture, VideoPlay, Clock } from '@element-plus/icons-vue'
+import TaskQueuePanel from './components/TaskQueuePanel.vue'
 </script>
 
 <style scoped>

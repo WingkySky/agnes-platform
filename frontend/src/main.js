@@ -16,6 +16,7 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import App from './App.vue'
 import router from './router'
 import './assets/main.css'
+import { useTaskQueueStore } from './stores/taskQueue'
 
 // 创建 Vue 应用
 const app = createApp(App)
@@ -38,3 +39,7 @@ app.use(ElementPlus, {
 document.documentElement.classList.add('dark')
 
 app.mount('#app')
+
+// 初始化全局任务队列 Store（恢复历史任务 + 启动后台轮询）
+const taskQueue = useTaskQueueStore()
+taskQueue.init()

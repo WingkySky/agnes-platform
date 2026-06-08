@@ -40,6 +40,7 @@ from app.core.config import settings
 from app.core.database import Base, engine, async_engine
 from app.routes import images, videos, history as history_route, config as config_route
 from app.services.video_poller import poller_manager
+from app.services.image_poller import image_poller_manager
 from app.services.agnes_client import agnes_client
 
 # ---------- 日志配置 ----------
@@ -82,6 +83,10 @@ async def lifespan(app: FastAPI):
     await poller_manager.start()
     logger.info("✓ 视频任务轮询器已就绪")
 
+    # 启动图片任务器后台清理协程
+    await image_poller_manager.start()
+    logger.info("✓ 图片任务器已就绪")
+
     logger.info("🚀 Agnes AI Platform（全异步架构）后端服务已启动")
 
     yield  # 应用在此期间运行
@@ -93,7 +98,11 @@ async def lifespan(app: FastAPI):
     await poller_manager.shutdown()
     logger.info("✓ 视频轮询器已关闭")
 
-    # 2. 关闭 HTTP 连接池
+    # 2. 取消所有图片生成任务
+    await image_poller_manager.shutdown()
+    logger.info("✓ 图片任务器已关闭")
+
+    # 3. 关闭 HTTP 连接池
     await agnes_client.shutdown()
     logger.info("✓ HTTP 连接池已关闭")
 
