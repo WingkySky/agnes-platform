@@ -17,9 +17,43 @@
         <el-radio-button value="image">图片 ({{ imageCount }})</el-radio-button>
         <el-radio-button value="video">视频 ({{ videoCount }})</el-radio-button>
       </el-radio-group>
-      <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadList(true)">
-        刷新
-      </el-button>
+      <div class="filter-actions">
+        <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadList(true)">
+          刷新
+        </el-button>
+        <!-- 编辑模式切换按钮 -->
+        <el-button
+          :type="editMode ? 'warning' : 'default'"
+          :icon="editMode ? 'Close' : 'Edit'"
+          @click="toggleEditMode">
+          {{ editMode ? '退出编辑' : '编辑' }}
+        </el-button>
+      </div>
+    </div>
+
+    <!-- 编辑模式操作栏（全选 + 批量删除） -->
+    <div v-if="editMode && list.length > 0" class="edit-toolbar">
+      <div class="edit-left">
+        <el-checkbox
+          v-model="isAllSelected"
+          :indeterminate="isIndeterminate"
+          @change="toggleSelectAll">
+          全选当前页
+        </el-checkbox>
+        <span class="selection-info">
+          已选 <b class="selection-count">{{ selectedIds.length }}</b> 条
+        </span>
+      </div>
+      <div class="edit-right">
+        <el-button
+          type="danger"
+          :icon="Delete"
+          :disabled="selectedIds.length === 0"
+          :loading="batchDeleting"
+          @click="confirmBatchDelete">
+          删除选中 ({{ selectedIds.length }})
+        </el-button>
+      </div>
     </div>
 
     <!-- 加载中 -->
@@ -40,7 +74,12 @@
         v-for="item in list"
         :key="item.id"
         class="history-card"
-        @click="showDetail(item)">
+        :class="{ 'is-selected': selectedIds.includes(item.id) }"
+        @click="handleCardClick(item)">
+        <!-- 编辑模式下的选择框 -->
+        <div v-if="editMode" class="card-checkbox" @click.stop="toggleSelect(item.id)">
+          <el-checkbox :model-value="selectedIds.includes(item.id)" />
+        </div>
         <div class="card-preview">
           <img
             v-if="item.type === 'image'"
@@ -150,14 +189,30 @@
         <el-button type="danger" @click="doDelete">确认删除</el-button>
       </template>
     </el-dialog>
+
+    <!-- 批量删除确认弹窗 -->
+    <el-dialog
+      v-model="batchDeleteVisible"
+      title="确认批量删除"
+      width="460px">
+      <div>
+        确定要删除已选中的 <b style="color:#ff9b9b">{{ selectedIds.length }}</b> 条记录吗？此操作不可撤销。
+      </div>
+      <template #footer>
+        <el-button @click="batchDeleteVisible = false">取消</el-button>
+        <el-button type="danger" :loading="batchDeleting" @click="doBatchDelete">
+          确认删除 ({{ selectedIds.length }})
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, Loading, Document, Delete, VideoPlay, CircleCloseFilled } from '@element-plus/icons-vue'
-import { getHistoryList, deleteHistoryRecord } from '@/api/history'
+import { Refresh, Loading, Document, Delete, VideoPlay, CircleCloseFilled, Edit, Close } from '@element-plus/icons-vue'
+import { getHistoryList, deleteHistoryRecord, batchDeleteHistory } from '@/api/history'
 
 const list = ref([])
 const loading = ref(false)
@@ -175,6 +230,24 @@ const detailVideoEl = ref(null)     // 详情弹窗中的 video 元素
 const detailPoster = ref('')         // 详情弹窗的视频首帧缩略图
 const detailVideoLoading = ref(false) // 视频加载中状态
 const detailVideoFailed = ref(false)  // 视频加载失败状态
+
+// ---------- 编辑 / 多选删除相关状态 ----------
+const editMode = ref(false)              // 是否进入编辑模式
+const selectedIds = ref([])              // 当前已选中的记录 ID 列表
+const batchDeleteVisible = ref(false)    // 批量删除确认弹窗
+const batchDeleting = ref(false)         // 批量删除加载状态
+
+// 计算属性：当前页是否全选 / 是否半选
+const isAllSelected = computed(() => {
+  if (!list.value.length) return false
+  return list.value.every(item => selectedIds.value.includes(item.id))
+})
+const isIndeterminate = computed(() => {
+  if (!list.value.length) return false
+  const pageIds = list.value.map(item => item.id)
+  const selectedOnPage = pageIds.filter(id => selectedIds.value.includes(id))
+  return selectedOnPage.length > 0 && selectedOnPage.length < pageIds.length
+})
 
 // 打开详情弹窗时重置视频状态
 watch(detailVisible, (val) => {
@@ -226,6 +299,92 @@ function showDetail(item) {
   detailVisible.value = true
   console.log('[History] 打开详情：', item)
 }
+
+// ---------- 编辑 / 多选删除方法 ----------
+/**
+ * 切换编辑模式
+ */
+function toggleEditMode() {
+  editMode.value = !editMode.value
+  if (!editMode.value) {
+    // 退出编辑模式时清空已选
+    selectedIds.value = []
+  }
+}
+
+/**
+ * 卡片点击：编辑模式下切换选择，否则打开详情
+ */
+function handleCardClick(item) {
+  if (editMode.value) {
+    toggleSelect(item.id)
+  } else {
+    showDetail(item)
+  }
+}
+
+/**
+ * 切换单条记录的选中状态
+ */
+function toggleSelect(id) {
+  const idx = selectedIds.value.indexOf(id)
+  if (idx >= 0) {
+    selectedIds.value.splice(idx, 1)
+  } else {
+    selectedIds.value.push(id)
+  }
+}
+
+/**
+ * 切换全选当前页
+ */
+function toggleSelectAll(val) {
+  if (val) {
+    // 全选：将当前页所有 ID 合并到 selectedIds
+    const pageIds = list.value.map(item => item.id)
+    const newSet = new Set(selectedIds.value)
+    pageIds.forEach(id => newSet.add(id))
+    selectedIds.value = Array.from(newSet)
+  } else {
+    // 取消全选：从 selectedIds 中移除当前页所有 ID
+    const pageIds = new Set(list.value.map(item => item.id))
+    selectedIds.value = selectedIds.value.filter(id => !pageIds.has(id))
+  }
+}
+
+/**
+ * 打开批量删除确认弹窗
+ */
+function confirmBatchDelete() {
+  if (selectedIds.value.length === 0) {
+    ElMessage.warning('请至少选择一条记录')
+    return
+  }
+  batchDeleteVisible.value = true
+}
+
+/**
+ * 执行批量删除
+ */
+async function doBatchDelete() {
+  if (selectedIds.value.length === 0) return
+  batchDeleting.value = true
+  try {
+    const res = await batchDeleteHistory(selectedIds.value)
+    const deletedCount = res?.deleted_count ?? selectedIds.value.length
+    ElMessage.success(`已成功删除 ${deletedCount} 条记录`)
+    batchDeleteVisible.value = false
+    selectedIds.value = []
+    // 删除后重新加载列表
+    loadList()
+  } catch (e) {
+    // 错误已在拦截器弹出
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
+// ---------- 详情其它操作 ----------
 
 /**
  * 通用复制文本到剪贴板（兼容非安全上下文降级方案）
@@ -384,6 +543,43 @@ onMounted(() => loadList())
   border: 1px solid rgba(120, 170, 255, 0.15);
 }
 
+/* 右侧动作按钮区域（刷新 + 编辑） */
+.filter-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* 编辑模式工具条 */
+.edit-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: rgba(60, 30, 30, 0.45);
+  border: 1px solid rgba(255, 155, 155, 0.25);
+  border-radius: 10px;
+}
+.edit-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: #d5e3f7;
+}
+.selection-info {
+  font-size: 13px;
+  color: #8ba3c9;
+}
+.selection-count {
+  color: #ff9b9b;
+  font-size: 15px;
+}
+.edit-right {
+  display: flex;
+  gap: 10px;
+}
+
 .loading-state, .empty-state {
   padding: 80px 20px;
   text-align: center;
@@ -405,11 +601,34 @@ onMounted(() => loadList())
   overflow: hidden;
   cursor: pointer;
   transition: all 0.2s ease;
+  position: relative;
+}
+/* 编辑模式选中状态 */
+.history-card.is-selected {
+  border-color: rgba(255, 155, 155, 0.75);
+  box-shadow: 0 0 0 2px rgba(255, 155, 155, 0.4), 0 8px 24px rgba(100, 150, 255, 0.2);
+  transform: translateY(-2px);
+}
+/* 卡片左上角的选择框 */
+.card-checkbox {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  padding: 6px 8px;
+  background: rgba(15, 24, 42, 0.7);
+  border-radius: 8px;
+  border: 1px solid rgba(120, 170, 255, 0.2);
+  cursor: pointer;
 }
 .history-card:hover {
   transform: translateY(-4px);
   box-shadow: 0 8px 32px rgba(100, 150, 255, 0.25);
   border-color: rgba(120, 170, 255, 0.4);
+}
+/* 编辑模式下的 hover 去掉位移，避免与选中效果冲突 */
+.history-card.is-selected:hover {
+  transform: translateY(-2px);
 }
 .card-preview {
   position: relative;

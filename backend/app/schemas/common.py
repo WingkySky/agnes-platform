@@ -83,3 +83,20 @@ class DeleteResponse(BaseModel):
     """删除操作响应"""
     success: bool
     message: str
+
+
+# =====================================================
+# 批量删除相关 Schema
+# =====================================================
+
+class BatchDeleteRequest(BaseModel):
+    """批量删除请求体（接收记录 ID 列表）"""
+    ids: List[int] = Field(..., description="要删除的记录 ID 列表")
+
+
+class BatchDeleteResponse(BaseModel):
+    """批量删除操作响应"""
+    success: bool
+    message: str
+    deleted_count: int = Field(description="实际成功删除的记录数量")
+    failed_ids: List[int] = Field(default_factory=list, description="删除失败的记录 ID 列表")

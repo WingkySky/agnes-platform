@@ -24,6 +24,14 @@ export function deleteHistoryRecord(id) {
 }
 
 /**
+ * 批量删除多条历史记录
+ * @param {Array<number>} ids - 要删除的记录 ID 列表
+ */
+export function batchDeleteHistory(ids) {
+  return client.post('/api/history/batch-delete', { ids })
+}
+
+/**
  * 获取前端配置（模型列表 / 尺寸选项等）
  */
 export function getPlatformConfig() {
