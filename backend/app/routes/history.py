@@ -10,6 +10,7 @@
 
 import logging
 import os
+import hashlib
 import tempfile
 import asyncio
 import httpx
@@ -313,9 +314,13 @@ THUMBNAIL_CACHE_DIR = os.path.join(tempfile.gettempdir(), "agnes_thumbnails")
 os.makedirs(THUMBNAIL_CACHE_DIR, exist_ok=True)
 
 
-def _get_cache_path(record_id: int, suffix: str) -> str:
-    """根据记录 ID 生成缓存文件路径"""
-    filename = f"video_{record_id}{suffix}"
+def _get_cache_path(record_id: int, suffix: str, video_url: str = "") -> str:
+    """
+    根据记录 ID 和视频 URL 生成缓存文件路径。
+    文件名包含视频 URL 的哈希值，避免删除旧记录后新记录复用相同 ID 时命中旧缓存。
+    """
+    url_hash = hashlib.md5(video_url.encode()).hexdigest()[:8] if video_url else "nourl"
+    filename = f"video_{record_id}_{url_hash}{suffix}"
     return os.path.join(THUMBNAIL_CACHE_DIR, filename)
 
 
@@ -429,8 +434,8 @@ async def get_video_thumbnail(record_id: int, db: AsyncSession = Depends(get_asy
     if not record.result_url:
         raise HTTPException(status_code=404, detail="视频资源链接不存在")
 
-    # 检查缓存
-    cache_path = _get_cache_path(record_id, "_thumb.jpg")
+    # 检查缓存（缓存路径包含视频 URL 哈希，避免旧记录缓存误命中）
+    cache_path = _get_cache_path(record_id, "_thumb.jpg", record.result_url)
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
         return FileResponse(
             cache_path,
@@ -491,8 +496,8 @@ async def get_video_preview(record_id: int, db: AsyncSession = Depends(get_async
     if not record.result_url:
         raise HTTPException(status_code=404, detail="视频资源链接不存在")
 
-    # 检查缓存
-    cache_path = _get_cache_path(record_id, "_preview.gif")
+    # 检查缓存（缓存路径包含视频 URL 哈希，避免旧记录缓存误命中）
+    cache_path = _get_cache_path(record_id, "_preview.gif", record.result_url)
     if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
         return FileResponse(
             cache_path,
