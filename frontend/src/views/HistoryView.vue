@@ -13,7 +13,7 @@
     <!-- 筛选 Tab -->
     <div class="filter-wrap">
       <el-radio-group v-model="filterType" @change="loadList(true)">
-        <el-radio-button value="all">全部 ({{ totalCount }})</el-radio-button>
+        <el-radio-button value="all">全部 ({{ imageCount + videoCount }})</el-radio-button>
         <el-radio-button value="image">图片 ({{ imageCount }})</el-radio-button>
         <el-radio-button value="video">视频 ({{ videoCount }})</el-radio-button>
       </el-radio-group>
@@ -394,8 +394,9 @@ async function loadList(resetPage = false) {
     })
     list.value = data.items || []
     totalCount.value = data.total || list.value.length
-    imageCount.value = list.value.filter(i => i.type === 'image').length
-    videoCount.value = list.value.filter(i => i.type === 'video').length
+    // 使用后端返回的全局类型计数（不受筛选条件和分页影响）
+    imageCount.value = data.total_image_count ?? 0
+    videoCount.value = data.total_video_count ?? 0
     console.log('[History] 加载完成：共 ' + list.value.length + ' 条记录（视频 ' + videoCount.value + ' 条）')
     // 自动加载视频首帧缩略图（不阻塞列表渲染）
     list.value.filter(i => i.type === 'video').forEach(item => {

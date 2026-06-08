@@ -52,10 +52,18 @@ async def get_history(
     if type and type.lower() in ("image", "video"):
         stmt = stmt.filter(Generation.type == type.lower())
 
-    # 总数查询
+    # 总数查询（按筛选条件）
     count_stmt = select(func.count()).select_from(stmt.subquery())
     count_result = await db.execute(count_stmt)
     total = count_result.scalar_one() or 0
+
+    # 各类型全局计数（不受筛选条件影响，始终返回全量统计）
+    img_count_stmt = select(func.count()).filter(Generation.type == "image")
+    vid_count_stmt = select(func.count()).filter(Generation.type == "video")
+    img_count_result = await db.execute(img_count_stmt)
+    vid_count_result = await db.execute(vid_count_stmt)
+    total_image_count = img_count_result.scalar_one() or 0
+    total_video_count = vid_count_result.scalar_one() or 0
 
     # 分页 + 倒序查询
     stmt = stmt.order_by(desc(Generation.created_at)).offset((page - 1) * page_size).limit(page_size)
@@ -82,6 +90,8 @@ async def get_history(
         page=page,
         page_size=page_size,
         items=records,
+        total_image_count=total_image_count,
+        total_video_count=total_video_count,
     )
 
 

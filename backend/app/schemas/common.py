@@ -72,11 +72,13 @@ class GenerationRecord(BaseModel):
 
 
 class HistoryListResponse(BaseModel):
-    """历史列表响应体（支持分页）"""
-    total: int
+    """历史列表响应体（支持分页 + 各类型全局计数）"""
+    total: int                                          # 当前筛选条件下的总记录数
     page: int
     page_size: int
     items: List[GenerationRecord]
+    total_image_count: int = 0                           # 图片记录全局总数（不受筛选影响）
+    total_video_count: int = 0                           # 视频记录全局总数（不受筛选影响）
 
 
 class DeleteResponse(BaseModel):
