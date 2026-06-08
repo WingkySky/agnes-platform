@@ -235,10 +235,14 @@ async function handleGenerate() {
     }
     ElMessage.success('图片生成成功！')
   } catch (err) {
-      result.value = null
-    } finally {
-      loading.value = false
-    }
+    result.value = null
+    // 显示错误信息
+    const errorMsg = err?.response?.data?.detail || err?.message || '图片生成失败，请稍后重试'
+    ElMessage.error(errorMsg)
+    console.error('[图片生成错误]', err)
+  } finally {
+    loading.value = false
+  }
 }
 
 // ============ 结果操作 ============
