@@ -3,15 +3,20 @@
 # GET    /api/history           - 获取历史列表（分页 + 按类型筛选）
 # DELETE /api/history/{id}      - 删除单条记录
 # DELETE /api/history/batch     - 批量删除多条记录（按 ID 列表）
-# GET    /api/history/video/{id}/stream - 视频流代理（支持 Range 请求 + CORS）
+# GET    /api/history/video/{id}/stream    - 视频流代理（支持 Range 请求 + CORS）
+# GET    /api/history/video/{id}/thumbnail - 视频首帧缩略图提取
+# GET    /api/history/video/{id}/preview   - 视频预览片段（悬停 GIF 效果）
 # =====================================================
 
 import logging
+import os
+import tempfile
+import asyncio
 import httpx
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
-from fastapi.responses import StreamingResponse, Response as FastAPIResponse
+from fastapi.responses import StreamingResponse, Response as FastAPIResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import desc, func
@@ -295,3 +300,229 @@ async def stream_video(request: Request, record_id: int, db: AsyncSession = Depe
         headers=response_headers,
         status_code=status_code,
     )
+
+
+# =====================================================
+# 视频缩略图 & 预览接口
+# 用途：提取视频首帧作为缩略图，提取多帧生成 GIF 预览
+# 缓存策略：使用文件系统缓存，避免重复提取
+# =====================================================
+
+# 缩略图缓存目录
+THUMBNAIL_CACHE_DIR = os.path.join(tempfile.gettempdir(), "agnes_thumbnails")
+os.makedirs(THUMBNAIL_CACHE_DIR, exist_ok=True)
+
+
+def _get_cache_path(record_id: int, suffix: str) -> str:
+    """根据记录 ID 生成缓存文件路径"""
+    filename = f"video_{record_id}{suffix}"
+    return os.path.join(THUMBNAIL_CACHE_DIR, filename)
+
+
+async def _download_video_partial(video_url: str, output_path: str, max_bytes: int = 5 * 1024 * 1024) -> bool:
+    """
+    下载视频的前 N 字节到临时文件（用于 ffmpeg 提取帧）。
+    大多数视频的 moov atom 在文件头部，5MB 足够提取首帧。
+    返回是否下载成功。
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            async with client.stream("GET", video_url, headers={"Range": "bytes=0-" + str(max_bytes - 1)}) as response:
+                # 某些服务器不支持 Range，返回 200；支持则返回 206
+                if response.status_code not in (200, 206):
+                    return False
+                with open(output_path, "wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        f.write(chunk)
+                        if f.tell() >= max_bytes:
+                            break
+        return os.path.getsize(output_path) > 0
+    except Exception as e:
+        logger.warning("[缩略图] 下载视频片段失败: %s", e)
+        return False
+
+
+async def _extract_frame_with_ffmpeg(input_path: str, output_path: str, time_offset: str = "0") -> bool:
+    """
+    使用 ffmpeg 从视频中提取指定时间点的帧。
+    time_offset 格式：如 "0"（首帧）、"1"（第1秒）等。
+    返回是否提取成功。
+    """
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", time_offset,
+            "-i", input_path,
+            "-vframes", "1",
+            "-q:v", "4",
+            "-vf", "scale=480:-2",
+            output_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        if proc.returncode != 0:
+            logger.warning("[缩略图] ffmpeg 提取帧失败 (offset=%s): %s", time_offset, stderr.decode(errors="ignore")[:200])
+            return False
+        return os.path.getsize(output_path) > 0
+    except asyncio.TimeoutError:
+        logger.warning("[缩略图] ffmpeg 超时")
+        return False
+    except Exception as e:
+        logger.warning("[缩略图] ffmpeg 异常: %s", e)
+        return False
+
+
+async def _extract_gif_with_ffmpeg(input_path: str, output_path: str, duration: float = 3.0) -> bool:
+    """
+    使用 ffmpeg 从视频中提取前 N 秒生成 GIF 预览。
+    返回是否生成成功。
+    """
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-t", str(duration),
+            "-i", input_path,
+            "-vf", "fps=6,scale=320:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+            "-loop", "0",
+            output_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        if proc.returncode != 0:
+            logger.warning("[缩略图] ffmpeg 生成 GIF 失败: %s", stderr.decode(errors="ignore")[:200])
+            return False
+        return os.path.getsize(output_path) > 0
+    except asyncio.TimeoutError:
+        logger.warning("[缩略图] ffmpeg GIF 生成超时")
+        return False
+    except Exception as e:
+        logger.warning("[缩略图] ffmpeg GIF 异常: %s", e)
+        return False
+
+
+@router.get("/history/video/{record_id}/thumbnail", summary="视频首帧缩略图")
+async def get_video_thumbnail(record_id: int, db: AsyncSession = Depends(get_async_db)):
+    """
+    提取视频首帧作为缩略图（JPEG 格式）。
+    使用文件缓存，同一视频只提取一次。
+    """
+    # 查询视频记录
+    result = await db.execute(
+        select(Generation).filter(Generation.id == record_id)
+    )
+    record = result.scalar_one_or_none()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="未找到对应视频记录")
+
+    if record.type != "video":
+        raise HTTPException(status_code=400, detail="该记录不是视频类型")
+
+    if not record.result_url:
+        raise HTTPException(status_code=404, detail="视频资源链接不存在")
+
+    # 检查缓存
+    cache_path = _get_cache_path(record_id, "_thumb.jpg")
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+        return FileResponse(
+            cache_path,
+            media_type="image/jpeg",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+
+    # 下载视频片段并提取首帧
+    tmp_video = os.path.join(tempfile.gettempdir(), f"agnes_vtmp_{record_id}.mp4")
+    try:
+        download_ok = await _download_video_partial(record.result_url, tmp_video)
+        if not download_ok:
+            raise HTTPException(status_code=500, detail="下载视频片段失败，无法提取缩略图")
+
+        extract_ok = await _extract_frame_with_ffmpeg(tmp_video, cache_path, time_offset="0")
+        if not extract_ok:
+            # 首帧提取失败时，尝试第 0.5 秒
+            extract_ok = await _extract_frame_with_ffmpeg(tmp_video, cache_path, time_offset="0.5")
+
+        if not extract_ok or not os.path.exists(cache_path):
+            raise HTTPException(status_code=500, detail="提取视频首帧失败")
+
+        return FileResponse(
+            cache_path,
+            media_type="image/jpeg",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+    finally:
+        # 清理临时视频文件
+        if os.path.exists(tmp_video):
+            os.remove(tmp_video)
+
+
+@router.get("/history/video/{record_id}/preview", summary="视频预览 GIF（悬停效果）")
+async def get_video_preview(record_id: int, db: AsyncSession = Depends(get_async_db)):
+    """
+    生成视频前 3 秒的 GIF 预览，用于鼠标悬停时的动态效果。
+    使用文件缓存，同一视频只生成一次。
+    """
+    # 查询视频记录
+    result = await db.execute(
+        select(Generation).filter(Generation.id == record_id)
+    )
+    record = result.scalar_one_or_none()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="未找到对应视频记录")
+
+    if record.type != "video":
+        raise HTTPException(status_code=400, detail="该记录不是视频类型")
+
+    if not record.result_url:
+        raise HTTPException(status_code=404, detail="视频资源链接不存在")
+
+    # 检查缓存
+    cache_path = _get_cache_path(record_id, "_preview.gif")
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+        return FileResponse(
+            cache_path,
+            media_type="image/gif",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+
+    # 下载视频片段并生成 GIF
+    tmp_video = os.path.join(tempfile.gettempdir(), f"agnes_vtmp_{record_id}_preview.mp4")
+    try:
+        download_ok = await _download_video_partial(record.result_url, tmp_video, max_bytes=10 * 1024 * 1024)
+        if not download_ok:
+            raise HTTPException(status_code=500, detail="下载视频片段失败，无法生成预览")
+
+        gif_ok = await _extract_gif_with_ffmpeg(tmp_video, cache_path, duration=3.0)
+        if not gif_ok or not os.path.exists(cache_path):
+            raise HTTPException(status_code=500, detail="生成视频预览 GIF 失败")
+
+        return FileResponse(
+            cache_path,
+            media_type="image/gif",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
+    finally:
+        # 清理临时视频文件
+        if os.path.exists(tmp_video):
+            os.remove(tmp_video)

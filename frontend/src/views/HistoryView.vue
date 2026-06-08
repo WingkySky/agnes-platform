@@ -87,11 +87,36 @@
             alt="history thumbnail"
             loading="lazy"
           />
-          <!-- 视频卡片：显示占位缩略图 + 播放图标，避免提前加载视频资源 -->
-          <div v-else-if="item.type === 'video'" class="video-thumb">
-            <div class="video-thumb-inner">
+          <!-- 视频卡片：首帧缩略图 + 悬停 GIF 预览 -->
+          <div
+            v-else-if="item.type === 'video'"
+            class="video-thumb"
+            @mouseenter="onVideoCardHover(item)"
+            @mouseleave="onVideoCardLeave(item)"
+          >
+            <!-- 首帧缩略图（静态） -->
+            <img
+              v-if="videoThumbnails[item.id]"
+              :src="videoThumbnails[item.id]"
+              alt="video thumbnail"
+              class="video-thumb-img"
+              loading="lazy"
+            />
+            <!-- 缩略图加载失败时的占位 -->
+            <div v-else class="video-thumb-placeholder">
               <el-icon :size="44" class="play-icon"><VideoPlay /></el-icon>
               <span class="video-thumb-label">点击播放</span>
+            </div>
+            <!-- 悬停时的 GIF 预览 -->
+            <img
+              v-if="hoveredVideoId === item.id && videoPreviews[item.id]"
+              :src="videoPreviews[item.id]"
+              alt="video preview"
+              class="video-preview-gif"
+            />
+            <!-- 播放图标蒙层 -->
+            <div class="video-play-overlay">
+              <el-icon :size="32"><VideoPlay /></el-icon>
             </div>
           </div>
           <div class="type-badge" :class="item.type">
@@ -209,7 +234,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, watch, nextTick, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Loading, Document, Delete, VideoPlay, CircleCloseFilled, Edit, Close } from '@element-plus/icons-vue'
 import { getHistoryList, deleteHistoryRecord, batchDeleteHistory } from '@/api/history'
@@ -230,6 +255,14 @@ const detailVideoEl = ref(null)     // 详情弹窗中的 video 元素
 const detailPoster = ref('')         // 详情弹窗的视频首帧缩略图
 const detailVideoLoading = ref(false) // 视频加载中状态
 const detailVideoFailed = ref(false)  // 视频加载失败状态
+
+// ---------- 视频缩略图 & 预览相关状态 ----------
+const videoThumbnails = reactive({})  // 视频首帧缩略图 URL 映射 { id: url }
+const videoPreviews = reactive({})    // 视频 GIF 预览 URL 映射 { id: url }
+const hoveredVideoId = ref(null)      // 当前鼠标悬停的视频卡片 ID
+const thumbnailLoading = reactive({}) // 缩略图加载中状态 { id: boolean }
+const previewLoading = reactive({})   // 预览 GIF 加载中状态 { id: boolean }
+const thumbnailFailed = reactive({})  // 缩略图加载失败 { id: boolean }
 
 // ---------- 编辑 / 多选删除相关状态 ----------
 const editMode = ref(false)              // 是否进入编辑模式
@@ -258,6 +291,71 @@ function getVideoStreamUrl(item) {
   return `/api/history/video/${item.id}/stream`
 }
 
+// ---------- 视频缩略图 & 预览方法 ----------
+
+/**
+ * 加载视频首帧缩略图
+ */
+async function loadVideoThumbnail(item) {
+  if (videoThumbnails[item.id] || thumbnailLoading[item.id] || thumbnailFailed[item.id]) return
+  thumbnailLoading[item.id] = true
+  try {
+    const url = `/api/history/video/${item.id}/thumbnail`
+    // 用 Image 对象预加载，验证图片是否可用
+    await new Promise((resolve, reject) => {
+      const img = new Image()
+      img.onload = resolve
+      img.onerror = reject
+      img.src = url
+    })
+    videoThumbnails[item.id] = url
+  } catch (e) {
+    console.warn('[History] 视频缩略图加载失败 id=' + item.id, e)
+    thumbnailFailed[item.id] = true
+  } finally {
+    thumbnailLoading[item.id] = false
+  }
+}
+
+/**
+ * 加载视频 GIF 预览
+ */
+async function loadVideoPreview(item) {
+  if (videoPreviews[item.id] || previewLoading[item.id]) return
+  previewLoading[item.id] = true
+  try {
+    const url = `/api/history/video/${item.id}/preview`
+    // 用 Image 对象预加载 GIF
+    await new Promise((resolve, reject) => {
+      const img = new Image()
+      img.onload = resolve
+      img.onerror = reject
+      img.src = url
+    })
+    videoPreviews[item.id] = url
+  } catch (e) {
+    console.warn('[History] 视频预览 GIF 加载失败 id=' + item.id, e)
+  } finally {
+    previewLoading[item.id] = false
+  }
+}
+
+/**
+ * 鼠标悬停视频卡片：显示 GIF 预览
+ */
+function onVideoCardHover(item) {
+  hoveredVideoId.value = item.id
+  // 延迟加载 GIF 预览（避免一进入页面就加载所有 GIF）
+  loadVideoPreview(item)
+}
+
+/**
+ * 鼠标离开视频卡片：隐藏 GIF 预览
+ */
+function onVideoCardLeave(item) {
+  hoveredVideoId.value = null
+}
+
 // 打开详情弹窗时重置视频状态
 watch(detailVisible, (val) => {
   if (val) {
@@ -282,6 +380,10 @@ async function loadList(resetPage = false) {
     imageCount.value = list.value.filter(i => i.type === 'image').length
     videoCount.value = list.value.filter(i => i.type === 'video').length
     console.log('[History] 加载完成：共 ' + list.value.length + ' 条记录（视频 ' + videoCount.value + ' 条）')
+    // 自动加载视频首帧缩略图（不阻塞列表渲染）
+    list.value.filter(i => i.type === 'video').forEach(item => {
+      loadVideoThumbnail(item)
+    })
   } catch (e) {
     console.error('[History] 加载失败：', e)
   } finally {
@@ -663,29 +765,71 @@ onMounted(() => loadList())
   object-fit: cover;
   display: block;
 }
-/* 视频卡片：轻量占位缩略图 + 播放图标，避免加载视频资源 */
+/* 视频卡片：首帧缩略图 + 悬停 GIF 预览 */
 .video-thumb {
   width: 100%;
   height: 100%;
+  position: relative;
   background: linear-gradient(135deg, #1a2744 0%, #0f1a30 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  overflow: hidden;
 }
-.video-thumb-inner {
+/* 首帧缩略图 */
+.video-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: opacity 0.3s ease;
+}
+/* 缩略图加载失败时的占位 */
+.video-thumb-placeholder {
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   color: #8ba3c9;
 }
-.video-thumb-inner .play-icon {
+.video-thumb-placeholder .play-icon {
   color: #6b9cff;
   filter: drop-shadow(0 4px 12px rgba(107, 156, 255, 0.4));
 }
 .video-thumb-label {
   font-size: 13px;
   font-weight: 500;
+}
+/* 悬停时的 GIF 预览层 */
+.video-preview-gif {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+}
+/* 播放图标蒙层 */
+.video-play-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.25);
+  z-index: 2;
+  transition: opacity 0.2s ease;
+  color: rgba(255, 255, 255, 0.85);
+}
+.video-play-overlay .el-icon {
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.5));
+}
+/* 悬停时隐藏播放蒙层，显示 GIF */
+.video-thumb:hover .video-play-overlay {
+  opacity: 0;
+}
+.video-thumb:hover .video-thumb-img {
+  opacity: 0;
 }
 .type-badge {
   position: absolute;
