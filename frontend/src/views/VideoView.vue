@@ -184,7 +184,6 @@
                 controls
                 playsinline
                 preload="metadata"
-                crossorigin="anonymous"
                 class="result-video"
                 @loadeddata="capturePoster"
                 @loadedmetadata="onVideoLoaded"
@@ -343,8 +342,20 @@ const taskElapsedSec = computed(() => {
   return Math.floor((Date.now() - created) / 1000)
 })
 
-// 视频 URL
+// 视频 URL：使用后端代理接口，解决 Google Storage CORS 问题
 const videoUrl = computed(() => {
+  if (!activeTask.value) return ''
+  // 优先使用后端代理接口播放视频（通过 task_id 代理，避免 CORS）
+  const backendTaskId = activeTask.value.backendTaskId || activeTask.value.taskId
+  if (backendTaskId && activeTask.value.status === 'success') {
+    return `/api/videos/${backendTaskId}/stream`
+  }
+  // 任务未完成时返回空（不使用直链）
+  return ''
+})
+
+// 原始直链 URL（用于下载、复制链接等操作）
+const rawVideoUrl = computed(() => {
   if (!activeTask.value) return ''
   return activeTask.value.resultUrl || activeTask.value.url || ''
 })
@@ -466,13 +477,14 @@ function retryActiveTask() {
 
 // ---------- 下载/复制/新标签页 ----------
 async function downloadVideo() {
-  if (!videoUrl.value) {
+  const url = videoUrl.value || rawVideoUrl.value
+  if (!url) {
     ElMessage.warning('视频链接为空，无法下载')
     return
   }
   try {
     ElMessage.info('正在准备下载…')
-    const response = await fetch(videoUrl.value, { mode: 'cors' })
+    const response = await fetch(url)
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const blob = await response.blob()
     const blobUrl = URL.createObjectURL(blob)
@@ -486,23 +498,27 @@ async function downloadVideo() {
     ElMessage.success('已开始下载视频')
   } catch (err) {
     console.warn('[VideoView] fetch 下载失败：', err)
-    ElMessage.warning('跨域下载受限，已在新标签页打开。请右键视频选择「另存为」')
-    window.open(videoUrl.value, '_blank', 'noopener,noreferrer')
+    // 回退：用原始直链在新标签页打开
+    const fallbackUrl = rawVideoUrl.value || url
+    ElMessage.warning('下载受限，已在新标签页打开。请右键视频选择「另存为」')
+    window.open(fallbackUrl, '_blank', 'noopener,noreferrer')
   }
 }
 
 function copyVideoUrl() {
-  if (!videoUrl.value) {
+  // 复制原始直链（代理 URL 不适合分享）
+  const url = rawVideoUrl.value || videoUrl.value
+  if (!url) {
     ElMessage.warning('视频链接为空')
     return
   }
   if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(videoUrl.value)
+    navigator.clipboard.writeText(url)
       .then(() => ElMessage.success('视频链接已复制'))
       .catch(() => ElMessage.error('复制失败，请手动复制'))
   } else {
     const ta = document.createElement('textarea')
-    ta.value = videoUrl.value
+    ta.value = url
     document.body.appendChild(ta)
     ta.select()
     document.execCommand('copy')
@@ -512,11 +528,13 @@ function copyVideoUrl() {
 }
 
 function openInNewTab() {
-  if (!videoUrl.value) {
+  // 新标签页使用原始直链（直链可直接播放，不受 CORS 限制）
+  const url = rawVideoUrl.value || videoUrl.value
+  if (!url) {
     ElMessage.warning('视频链接为空，无法打开')
     return
   }
-  window.open(videoUrl.value, '_blank', 'noopener,noreferrer')
+  window.open(url, '_blank', 'noopener,noreferrer')
   ElMessage.success('已在新标签页打开')
 }
 
@@ -534,6 +552,7 @@ function capturePoster() {
     ctx.drawImage(el, 0, 0, canvas.width, canvas.height)
     posterUrl.value = canvas.toDataURL('image/jpeg', 0.82)
   } catch (e) {
+    // 走代理后一般不会 CORS 失败，但保留兜底
     console.warn('[VideoView] canvas 截图失败：', e)
   }
 }
