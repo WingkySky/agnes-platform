@@ -48,14 +48,13 @@
             alt="history thumbnail"
             loading="lazy"
           />
-          <video
-            v-else-if="item.type === 'video'"
-            :src="item.result_url"
-            :poster="item.result_url"
-            muted
-            playsinline
-            preload="metadata"
-          />
+          <!-- 视频卡片：显示占位缩略图 + 播放图标，避免提前加载视频资源 -->
+          <div v-else-if="item.type === 'video'" class="video-thumb">
+            <div class="video-thumb-inner">
+              <el-icon :size="44" class="play-icon"><VideoPlay /></el-icon>
+              <span class="video-thumb-label">点击播放</span>
+            </div>
+          </div>
           <div class="type-badge" :class="item.type">
             {{ item.type === 'image' ? '图片' : '视频' }}
           </div>
@@ -91,7 +90,34 @@
       <div v-if="detailItem" class="detail-content">
         <div class="detail-media">
           <img v-if="detailItem.type === 'image'" :src="detailItem.result_url" />
-          <video v-else :src="detailItem.result_url" controls />
+          <div v-else class="detail-video-wrap">
+            <video
+              v-if="detailItem.result_url"
+              ref="detailVideoEl"
+              :src="detailItem.result_url"
+              :poster="detailPoster"
+              controls
+              playsinline
+              preload="metadata"
+              crossorigin="anonymous"
+              class="detail-video"
+              @loadeddata="captureDetailPoster"
+              @canplay="onDetailVideoCanPlay"
+              @error="onDetailVideoError"
+            />
+            <div v-else class="detail-video-empty">
+              <el-icon :size="36" color="#ff9b9b"><CircleCloseFilled /></el-icon>
+              <div>此记录无有效视频链接</div>
+            </div>
+            <div v-if="detailVideoLoading" class="detail-video-status">
+              <el-icon :size="24" class="spinner"><Loading /></el-icon>
+              <span>视频加载中…</span>
+            </div>
+            <div v-if="detailVideoFailed" class="detail-video-status error">
+              <el-icon :size="24"><CircleCloseFilled /></el-icon>
+              <span>视频无法播放，请尝试「下载」或「新标签页打开」</span>
+            </div>
+          </div>
         </div>
         <div class="detail-info">
           <div class="info-row"><span class="label">提示词：</span><span>{{ detailItem.prompt }}</span></div>
@@ -99,8 +125,13 @@
           <div class="info-row" v-if="detailItem.model"><span class="label">模型：</span><span>{{ detailItem.model }}</span></div>
           <div class="info-row"><span class="label">状态：</span><span>{{ detailItem.status || 'success' }}</span></div>
           <div class="info-row"><span class="label">创建时间：</span><span>{{ detailItem.created_at }}</span></div>
-          <div class="info-row"><span class="label">链接：</span><el-button link type="primary" @click="copyLink(detailItem.result_url)">复制链接</el-button></div>
-          <div class="info-row"><span class="label"></span><el-button link type="primary" @click="downloadDetail">下载</el-button></div>
+          <div class="info-row url-row">
+            <span class="label">链接：</span>
+            <span class="url-value">{{ detailItem.result_url }}</span>
+            <el-button size="small" link type="primary" @click="copyLink(detailItem.result_url)">复制链接</el-button>
+            <el-button size="small" link type="primary" @click="downloadDetail">下载</el-button>
+            <el-button size="small" link type="primary" @click="openInNewTab">新标签页打开</el-button>
+          </div>
         </div>
       </div>
       <template #footer>
@@ -123,9 +154,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, Loading, Document, Delete } from '@element-plus/icons-vue'
+import { Refresh, Loading, Document, Delete, VideoPlay, CircleCloseFilled } from '@element-plus/icons-vue'
 import { getHistoryList, deleteHistoryRecord } from '@/api/history'
 
 const list = ref([])
@@ -140,6 +171,19 @@ const filterType = ref('all')
 const detailVisible = ref(false)
 const deleteVisible = ref(false)
 const detailItem = ref(null)
+const detailVideoEl = ref(null)     // 详情弹窗中的 video 元素
+const detailPoster = ref('')         // 详情弹窗的视频首帧缩略图
+const detailVideoLoading = ref(false) // 视频加载中状态
+const detailVideoFailed = ref(false)  // 视频加载失败状态
+
+// 打开详情弹窗时重置视频状态
+watch(detailVisible, (val) => {
+  if (val) {
+    detailPoster.value = ''
+    detailVideoLoading.value = detailItem.value?.type === 'video' && !!detailItem.value?.result_url
+    detailVideoFailed.value = false
+  }
+})
 
 // ---------- 加载列表 ----------
 async function loadList(resetPage = false) {
@@ -155,8 +199,9 @@ async function loadList(resetPage = false) {
     totalCount.value = data.total || list.value.length
     imageCount.value = list.value.filter(i => i.type === 'image').length
     videoCount.value = list.value.filter(i => i.type === 'video').length
+    console.log('[History] 加载完成：共 ' + list.value.length + ' 条记录（视频 ' + videoCount.value + ' 条）')
   } catch (e) {
-    // 已由 axios 拦截器弹出错误
+    console.error('[History] 加载失败：', e)
   } finally {
     loading.value = false
   }
@@ -175,31 +220,123 @@ function handleSizeChange(size) {
 // ---------- 详情操作 ----------
 function showDetail(item) {
   detailItem.value = item
+  detailPoster.value = ''
+  detailVideoLoading.value = item.type === 'video' && !!item.result_url
+  detailVideoFailed.value = false
   detailVisible.value = true
+  console.log('[History] 打开详情：', item)
 }
+
+/**
+ * 通用复制文本到剪贴板（兼容非安全上下文降级方案）
+ */
+function copyToClipboard(text) {
+  if (!text) return Promise.resolve()
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text)
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  ta.style.top = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  let ok = false
+  try { ok = document.execCommand('copy') } catch (e) { ok = false }
+  document.body.removeChild(ta)
+  return ok ? Promise.resolve() : Promise.reject(new Error('copy failed'))
+}
+
 function copyLink(url) {
-  if (!url) return
-  navigator.clipboard?.writeText(url)
-    .then(() => ElMessage.success('链接已复制'))
-    .catch(() => {
-      const ta = document.createElement('textarea')
-      ta.value = url
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
-      ElMessage.success('链接已复制')
-    })
+  if (!url) {
+    ElMessage.warning('此记录无有效链接')
+    return
+  }
+  copyToClipboard(url)
+    .then(() => ElMessage.success('链接已复制到剪贴板'))
+    .catch(() => ElMessage.error('复制失败，请手动选择链接文本复制'))
 }
-function downloadDetail() {
-  if (!detailItem.value?.result_url) return
-  const a = document.createElement('a')
-  a.href = detailItem.value.result_url
-  a.download = `agnes-${detailItem.value.type}-${detailItem.value.id}`
-  a.target = '_blank'
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+
+/**
+ * 下载资源：优先 fetch + Blob 下载（同源/带 CORS 头），失败回退为新标签页打开
+ */
+async function downloadDetail() {
+  if (!detailItem.value?.result_url) {
+    ElMessage.warning('此记录无有效资源链接')
+    return
+  }
+  const url = detailItem.value.result_url
+  const type = detailItem.value.type
+  try {
+    ElMessage.info('正在准备下载，请稍候…')
+    const response = await fetch(url, { mode: 'cors' })
+    if (!response.ok) throw new Error('HTTP ' + response.status)
+    const blob = await response.blob()
+    const blobUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = blobUrl
+    a.download = 'agnes-' + type + '-' + (detailItem.value.id || Date.now())
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000)
+    ElMessage.success('已开始下载')
+  } catch (err) {
+    console.warn('[History] fetch 下载失败，回退为新标签页打开：', err)
+    ElMessage.warning('跨域下载受限，已在新标签页打开。请右键并选择「另存为」。')
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+}
+
+/**
+ * 在新标签页直接打开资源链接
+ */
+function openInNewTab() {
+  if (!detailItem.value?.result_url) {
+    ElMessage.warning('此记录无有效资源链接')
+    return
+  }
+  window.open(detailItem.value.result_url, '_blank', 'noopener,noreferrer')
+  ElMessage.success('已在新标签页打开')
+}
+
+/**
+ * 详情弹窗中视频 loadeddata：canvas 截取首帧作为 poster
+ */
+function captureDetailPoster() {
+  const el = detailVideoEl.value
+  if (!el || !el.videoWidth || detailPoster.value) return
+  try {
+    const canvas = document.createElement('canvas')
+    const scale = Math.min(1, 720 / el.videoWidth)
+    canvas.width = Math.floor(el.videoWidth * scale)
+    canvas.height = Math.floor(el.videoHeight * scale)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.drawImage(el, 0, 0, canvas.width, canvas.height)
+    detailPoster.value = canvas.toDataURL('image/jpeg', 0.82)
+  } catch (e) {
+    console.warn('[History] canvas 截图失败（可能跨域污染）：', e)
+  }
+}
+
+/**
+ * 视频可以播放时清除加载状态
+ */
+function onDetailVideoCanPlay() {
+  detailVideoLoading.value = false
+  detailVideoFailed.value = false
+}
+
+/**
+ * 视频加载失败
+ */
+function onDetailVideoError(e) {
+  console.error('[History] 视频加载/播放失败：', e)
+  detailVideoLoading.value = false
+  detailVideoFailed.value = true
+  ElMessage.error('视频加载失败，请尝试「下载」或「新标签页打开」')
 }
 
 function confirmDelete() {
@@ -288,6 +425,30 @@ onMounted(() => loadList())
   object-fit: cover;
   display: block;
 }
+/* 视频卡片：轻量占位缩略图 + 播放图标，避免加载视频资源 */
+.video-thumb {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(135deg, #1a2744 0%, #0f1a30 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.video-thumb-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: #8ba3c9;
+}
+.video-thumb-inner .play-icon {
+  color: #6b9cff;
+  filter: drop-shadow(0 4px 12px rgba(107, 156, 255, 0.4));
+}
+.video-thumb-label {
+  font-size: 13px;
+  font-weight: 500;
+}
 .type-badge {
   position: absolute;
   top: 10px;
@@ -343,4 +504,76 @@ onMounted(() => loadList())
 }
 .info-row { padding: 6px 0; font-size: 13px; line-height: 1.6; color: #d5e3f7; }
 .label { color: #8ba3c9; margin-right: 8px; font-weight: 500; }
+.url-row {
+  margin-top: 8px;
+  padding: 12px !important;
+  background: rgba(10, 20, 40, 0.6);
+  border: 1px solid rgba(120, 170, 255, 0.15);
+  border-radius: 8px;
+  word-break: break-all;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.url-row .url-value {
+  color: #d5e3f7;
+  font-family: monospace;
+  font-size: 12px;
+  max-width: 100%;
+  flex: 1;
+  min-width: 200px;
+}
+.detail-video {
+  max-width: 100%;
+  max-height: 400px;
+  border-radius: 10px;
+  background: #000;
+}
+
+/* 视频容器（包含状态蒙层） */
+.detail-video-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+}
+
+/* 无链接时的占位提示 */
+.detail-video-empty {
+  padding: 40px 20px;
+  background: #0a1220;
+  border-radius: 10px;
+  text-align: center;
+  color: #8ba3c9;
+  font-size: 13px;
+}
+.detail-video-empty div { margin-top: 10px; }
+
+/* 视频状态蒙层（加载中/失败） */
+.detail-video-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.72);
+  border-radius: 10px;
+  color: #d5e3f7;
+  font-size: 13px;
+  pointer-events: none;
+}
+.detail-video-status.error {
+  color: #ff9b9b;
+}
+
+/* 旋转加载图标 */
+.spinner {
+  display: inline-block;
+  animation: spin 1.2s linear infinite;
+  color: #6b9cff;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 </style>

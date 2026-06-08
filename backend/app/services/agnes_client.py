@@ -260,9 +260,13 @@ class AgnesAIClient:
             if status not in ("completed", "success"):
                 status = "completed"
 
+        # 视频 URL 提取：按优先级检查多种可能字段
+        # Agnes API 实际把视频 URL 存储在 remixed_from_video_id 字段中
         video_url = (
             data.get("video_url")
+            or data.get("remixed_from_video_id")  # Agnes API 实际使用的字段
             or (isinstance(data.get("data"), dict) and data["data"].get("video_url"))
+            or (isinstance(data.get("data"), dict) and data["data"].get("remixed_from_video_id"))
             or (isinstance(data.get("data"), dict) and data["data"].get("url"))
             or data.get("url")
             or (
@@ -272,6 +276,10 @@ class AgnesAIClient:
             )
             or None
         )
+
+        # 确保提取到的值是有效的 URL（以 http 开头），否则丢弃
+        if video_url and isinstance(video_url, str) and not video_url.startswith("http"):
+            video_url = None
 
         progress = data.get("progress")
         if not isinstance(progress, (int, float)):
