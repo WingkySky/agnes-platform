@@ -28,14 +28,23 @@
 
           <!-- 模式切换 -->
           <el-tabs v-model="mode">
-              <el-tab-pane label="📝 文生视频" name="text2video">
-                <span class="tab-sub">仅提示词</span>
+              <el-tab-pane name="text2video">
+                <template #label>
+                  <span>📝 文生视频</span>
+                  <span class="tab-sub">仅提示词</span>
+                </template>
               </el-tab-pane>
-              <el-tab-pane label="🖼 图生视频" name="image2video">
-                <span class="tab-sub">参考图 + 提示词</span>
+              <el-tab-pane name="image2video">
+                <template #label>
+                  <span>🖼 图生视频</span>
+                  <span class="tab-sub">参考图 + 提示词</span>
+                </template>
               </el-tab-pane>
-              <el-tab-pane label="🎞 关键帧动画" name="keyframes">
-                <span class="tab-sub">多张关键帧 + 提示词</span>
+              <el-tab-pane name="keyframes">
+                <template #label>
+                  <span>🎞 关键帧动画</span>
+                  <span class="tab-sub">多张关键帧 + 提示词</span>
+                </template>
               </el-tab-pane>
           </el-tabs>
 

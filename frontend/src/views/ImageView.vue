@@ -29,11 +29,17 @@
 
           <!-- 模式切换 -->
           <el-tabs v-model="mode" class="mode-tabs">
-              <el-tab-pane label="📝 文生图" name="text2image">
-                <span class="tab-sub">仅输入提示词，AI 从零生成图片</span>
+              <el-tab-pane name="text2image">
+                <template #label>
+                  <span>📝 文生图</span>
+                  <span class="tab-sub">仅输入提示词，AI 从零生成图片</span>
+                </template>
               </el-tab-pane>
-              <el-tab-pane label="🖼 图生图" name="image2image">
-                <span class="tab-sub">上传参考图 + 提示词，AI 基于参考图创作</span>
+              <el-tab-pane name="image2image">
+                <template #label>
+                  <span>🖼 图生图</span>
+                  <span class="tab-sub">上传参考图 + 提示词，AI 基于参考图创作</span>
+                </template>
               </el-tab-pane>
           </el-tabs>
 

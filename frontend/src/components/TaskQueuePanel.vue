@@ -89,10 +89,13 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import TaskCard from './TaskCard.vue'
 import { useTaskQueueStore } from '@/stores/taskQueue'
 
 const queue = useTaskQueueStore()
+const router = useRouter()
+const route = useRoute()
 const activeTab = ref('all')
 
 const tabs = [
@@ -130,7 +133,16 @@ function getTabCount(key) {
 }
 
 function handleSelectTask(taskId) {
+  const task = queue.tasks[taskId]
+  if (!task) return
+  // 先设置当前活跃任务，再根据类型跳转到对应的视图
   queue.setActiveTask(taskId)
+  // 根据任务类型决定目标路由
+  const targetPath = task.type === 'video' ? '/videos' : '/images'
+  // 如果已经在正确的页面，则不跳转
+  if (route.path !== targetPath) {
+    router.push(targetPath)
+  }
 }
 
 onMounted(() => {
