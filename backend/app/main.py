@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.database import Base, engine, async_engine
-from app.routes import images, videos, history as history_route, config as config_route
+from app.routes import images, videos, history as history_route, config as config_route, chat as chat_route
 from app.services.video_poller import poller_manager
 from app.services.image_poller import image_poller_manager
 from app.services.agnes_client import agnes_client
@@ -154,6 +154,7 @@ app.include_router(config_route.router, prefix="/api", tags=["配置"])
 app.include_router(images.router, prefix="/api", tags=["图片生成"])
 app.include_router(videos.router, prefix="/api", tags=["视频生成"])
 app.include_router(history_route.router, prefix="/api", tags=["生成历史"])
+app.include_router(chat_route.router, prefix="/api", tags=["AI 聊天"])
 
 
 # ---------- 健康检查 ----------

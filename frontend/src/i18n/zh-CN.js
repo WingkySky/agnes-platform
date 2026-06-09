@@ -40,6 +40,7 @@ export default {
 
   // ------ 顶部导航 ------
   nav: {
+    chat: 'AI 对话',
     images: '图片生成',
     videos: '视频生成',
     history: '生成历史',
@@ -309,9 +310,37 @@ export default {
 
   // ------ 路由 / 页面标题 ------
   router: {
+    chat: 'AI 对话',
     images: '图片生成',
     videos: '视频生成',
     history: '生成历史',
+  },
+
+  // ------ 聊天界面 ------
+  chat: {
+    title: '对话列表',
+    newChat: '新对话',
+    noSessions: '暂无对话，点击右上角 + 开始',
+    welcomeTitle: '你好，我是 Agnes AI 助手',
+    welcomeDesc: '我可以和你聊天，也可以帮你生成图片和视频。试试下面的快捷提示吧！',
+    startChat: '开始对话',
+    tipImage: '帮我生成一张赛博朋克城市夜景图片',
+    tipVideo: '帮我生成一段猫咪在海滩散步的视频',
+    tipChat: '介绍一下你自己',
+    inputPlaceholder: '输入消息...（Enter 发送，Shift+Enter 换行）',
+    inputHint: '你可以直接说"帮我画一张图"或"生成一段视频"，AI 会自动调用生成工具',
+    generatingImage: '正在生成图片...',
+    generatingVideo: '正在生成视频...',
+    imageGenerating: '图片生成中，请稍候...',
+    videoGenerating: '视频生成中，通常需要 1-3 分钟...',
+    mediaLoading: '媒体加载中...',
+    mediaFailed: '生成失败，请重试',
+    videoNotSupported: '您的浏览器不支持视频播放',
+    confirmDelete: '确定要删除这个对话吗？所有消息将被清除。',
+    createFailed: '创建对话失败',
+    switchFailed: '切换对话失败',
+    sendFailed: '发送失败',
+    deleted: '对话已删除',
   },
 
   // ------ 首页加载 ------

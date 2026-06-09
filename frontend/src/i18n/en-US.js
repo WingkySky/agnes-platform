@@ -39,6 +39,7 @@ export default {
 
   // ------ Top navigation ------
   nav: {
+    chat: 'AI Chat',
     images: 'Image Generation',
     videos: 'Video Generation',
     history: 'Generation History',
@@ -308,9 +309,37 @@ export default {
 
   // ------ Router / page titles ------
   router: {
+    chat: 'AI Chat',
     images: 'Image Generation',
     videos: 'Video Generation',
     history: 'Generation History',
+  },
+
+  // ------ Chat interface ------
+  chat: {
+    title: 'Conversations',
+    newChat: 'New Chat',
+    noSessions: 'No conversations yet. Click + to start.',
+    welcomeTitle: 'Hi, I\'m Agnes AI Assistant',
+    welcomeDesc: 'I can chat with you and help generate images and videos. Try the quick tips below!',
+    startChat: 'Start Chat',
+    tipImage: 'Generate a cyberpunk city night scene image',
+    tipVideo: 'Generate a video of a cat walking on the beach',
+    tipChat: 'Tell me about yourself',
+    inputPlaceholder: 'Type a message... (Enter to send, Shift+Enter for new line)',
+    inputHint: 'You can say "generate an image" or "create a video" and AI will use the generation tools automatically',
+    generatingImage: 'Generating image...',
+    generatingVideo: 'Generating video...',
+    imageGenerating: 'Image generating, please wait...',
+    videoGenerating: 'Video generating, usually takes 1-3 minutes...',
+    mediaLoading: 'Loading media...',
+    mediaFailed: 'Generation failed, please retry',
+    videoNotSupported: 'Your browser does not support video playback',
+    confirmDelete: 'Are you sure you want to delete this conversation? All messages will be removed.',
+    createFailed: 'Failed to create conversation',
+    switchFailed: 'Failed to switch conversation',
+    sendFailed: 'Failed to send',
+    deleted: 'Conversation deleted',
   },
 
   // ------ First-page loading ------

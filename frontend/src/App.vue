@@ -19,6 +19,10 @@
         </div>
 
         <nav class="app-nav">
+          <router-link to="/chat" class="nav-item" active-class="active">
+            <el-icon><ChatDotRound /></el-icon>
+            <span>{{ t('nav.chat') }}</span>
+          </router-link>
           <router-link to="/images" class="nav-item" active-class="active">
             <el-icon><Picture /></el-icon>
             <span>{{ t('nav.images') }}</span>
@@ -60,7 +64,7 @@
 
 <script setup>
 import { computed } from 'vue'
-import { Picture, VideoPlay, Clock } from '@element-plus/icons-vue'
+import { Picture, VideoPlay, Clock, ChatDotRound } from '@element-plus/icons-vue'
 import TaskQueuePanel from './components/TaskQueuePanel.vue'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import { useI18n, getElementPlusLocale } from '@/i18n'

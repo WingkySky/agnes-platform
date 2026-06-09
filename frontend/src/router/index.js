@@ -10,7 +10,13 @@ import { useI18n } from '@/i18n'
 const routes = [
   {
     path: '/',
-    redirect: '/images'
+    redirect: '/chat'
+  },
+  {
+    path: '/chat',
+    name: 'chat',
+    component: () => import('@/views/ChatView.vue'),
+    meta: { titleKey: 'router.chat' }
   },
   {
     path: '/images',
@@ -33,7 +39,7 @@ const routes = [
   // 兜底路由
   {
     path: '/:pathMatch(.*)*',
-    redirect: '/images'
+    redirect: '/chat'
   }
 ]
 
