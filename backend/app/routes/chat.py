@@ -50,6 +50,11 @@ class CreateSessionRequest(BaseModel):
     title: Optional[str] = Field(default=None, description="会话标题（可选，默认取首条消息前 30 字）")
 
 
+class UpdateSessionRequest(BaseModel):
+    """修改会话标题请求"""
+    title: str = Field(..., min_length=1, max_length=200, description="新的会话标题")
+
+
 class SendMessageRequest(BaseModel):
     """发送消息请求"""
     content: str = Field(..., min_length=1, description="消息内容")
@@ -126,6 +131,73 @@ async def get_session(
         raise HTTPException(status_code=404, detail="会话不存在")
 
     return session.to_dict(include_messages=True)
+
+
+@router.put("/chat/sessions/{session_id}", summary="修改会话标题")
+async def update_session(
+    session_id: int,
+    req: UpdateSessionRequest,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """修改会话的标题"""
+    result = await db.execute(
+        select(ChatSession).filter(ChatSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    session.title = req.title[:200]
+    session.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(session)
+    logger.info("[Chat] 修改会话标题: id=%s, title=%s", session_id, session.title)
+    return session.to_dict()
+
+
+@router.post("/chat/sessions/{session_id}/summarize", summary="AI 自动总结会话主题")
+async def summarize_session(
+    session_id: int,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """使用 AI 分析对话内容，自动生成一个有意义的会话标题"""
+    # 检查会话是否存在
+    result = await db.execute(
+        select(ChatSession).filter(ChatSession.id == session_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    # 获取会话的前几条消息（用于总结主题）
+    result = await db.execute(
+        select(ChatMessage)
+        .filter(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.id)
+        .limit(10)
+    )
+    messages = result.scalars().all()
+
+    if not messages:
+        raise HTTPException(status_code=400, detail="会话没有消息，无法总结主题")
+
+    # 调用 AI 服务生成标题
+    try:
+        summary_title = await chat_service.summarize_session_title(messages)
+    except Exception as e:
+        logger.warning("[Chat] AI 总结标题失败，使用降级方案: %s", e)
+        # 降级方案：取第一条用户消息的前 30 字
+        first_user_msg = next((m for m in messages if m.role == "user"), None)
+        summary_title = (first_user_msg.content[:30] + "..." if first_user_msg and first_user_msg.content and len(first_user_msg.content) > 30
+                         else (first_user_msg.content if first_user_msg else "新对话"))
+
+    # 更新会话标题
+    session.title = summary_title[:200]
+    session.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(session)
+    logger.info("[Chat] 自动总结会话标题: id=%s, title=%s", session_id, session.title)
+    return session.to_dict()
 
 
 @router.delete("/chat/sessions/{session_id}", summary="删除会话")
@@ -281,10 +353,8 @@ async def send_message(
     )
     db.add(user_msg)
 
-    # 更新会话标题（如果是第一条消息）
-    if session.title == "新对话":
-        session.title = req.content[:30] + ("..." if len(req.content) > 30 else "")
-
+    # 注意：不再简单截断用户消息作为标题
+    # 改为在 AI 回复完成后，由 AI 自动总结对话主题生成有意义的标题
     # 更新会话时间
     session.updated_at = datetime.utcnow()
     await db.commit()
@@ -428,6 +498,36 @@ async def send_message(
                         yield f"data: {json.dumps({'type': 'assistant_message', 'message': final_msg.to_dict()}, ensure_ascii=False)}\n\n"
             except Exception as e:
                 logger.error("[Chat] 读取最终 AI 消息失败: %s", e)
+
+        # ── 自动总结会话标题（如果是新对话的第一轮） ──
+        #    参考 ChatGPT/Claude 的行为：对话完成后，AI 自动生成一个有意义的标题
+        #    这个过程在后台进行，不阻塞用户的对话体验
+        try:
+            async with async_session() as db_title:
+                session_for_title = await db_title.get(ChatSession, session_id)
+                if session_for_title and session_for_title.title == "新对话":
+                    # 收集会话的前几条消息（用户 + AI 的回复）用于总结
+                    msgs_for_title_result = await db_title.execute(
+                        select(ChatMessage)
+                        .filter(ChatMessage.session_id == session_id)
+                        .order_by(ChatMessage.id)
+                        .limit(6)
+                    )
+                    msgs_for_title = msgs_for_title_result.scalars().all()
+
+                    if msgs_for_title:
+                        # 调用 AI 生成标题
+                        auto_title = await chat_service.summarize_session_title(msgs_for_title)
+                        if auto_title and auto_title != "新对话":
+                            session_for_title.title = auto_title[:200]
+                            session_for_title.updated_at = datetime.utcnow()
+                            await db_title.commit()
+                            logger.info("[Chat] 自动总结会话标题: id=%s, title=%s", session_id, auto_title)
+                            # 通过 SSE 发送标题更新事件，通知前端刷新
+                            yield f"data: {json.dumps({'type': 'title_updated', 'title': auto_title}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            # 自动总结失败不影响主流程，只记录日志
+            logger.warning("[Chat] 自动总结会话标题失败: %s", e)
 
         yield "data: [DONE]\n\n"
 

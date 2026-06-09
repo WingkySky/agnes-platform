@@ -125,6 +125,85 @@ class ChatService:
         self.model = "agnes-2.0-flash"
 
     # =====================================================
+    # 【会话标题总结】—— 根据对话内容自动生成有意义的标题
+    # =====================================================
+    async def summarize_session_title(self, messages) -> str:
+        """
+        根据对话内容，使用 AI 生成一个简洁、有意义的会话标题。
+
+        Args:
+            messages: 消息对象列表（ChatMessage ORM 对象）
+
+        Returns:
+            生成的标题字符串（不超过 30 字）
+        """
+        # 提取对话内容（只用前 5 条，控制上下文长度）
+        chat_history = []
+        for msg in messages[:5]:
+            if msg.role in ("user", "assistant"):
+                content = msg.content or ""
+                if content.strip():
+                    # 截断过长的单条消息
+                    if len(content) > 500:
+                        content = content[:500] + "..."
+                    chat_history.append({
+                        "role": msg.role,
+                        "content": content,
+                    })
+
+        if not chat_history:
+            return "新对话"
+
+        # 构造总结标题的请求
+        system_prompt = """你是一个对话总结助手。请根据提供的对话内容，生成一个简洁、有意义的中文标题。
+
+要求：
+1. 标题必须使用中文
+2. 不超过 20 个字符
+3. 准确概括对话的核心主题或用户意图
+4. 不要加引号、冒号等前缀
+5. 只输出标题本身，不要输出任何其他文字、解释或说明"""
+
+        user_prompt = "请根据以下对话生成一个简洁的中文标题（不超过 20 字）：\n\n"
+        for item in chat_history:
+            role_label = "用户" if item["role"] == "user" else "助手"
+            user_prompt += f"{role_label}: {item['content']}\n"
+        user_prompt += "\n标题："
+
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.5,
+            "max_tokens": 50,
+        }
+
+        try:
+            result = await agnes_client._post(self.chat_url, body)
+            choice = result.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            title = message.get("content", "") or ""
+            title = title.strip().strip('"').strip("'").strip("`")
+            # 去除可能的前缀说明
+            if "：" in title and len(title) > 40:
+                title = title.split("：")[-1].strip()
+            if ":" in title and len(title) > 40:
+                title = title.split(":")[-1].strip()
+            # 限制长度
+            if len(title) > 30:
+                title = title[:30]
+            return title or "新对话"
+        except Exception as e:
+            logger.warning("[Chat] 总结标题失败: %s", e)
+            # 降级：取第一条用户消息的前 30 字
+            first_user = next((m for m in chat_history if m["role"] == "user"), None)
+            if first_user and first_user.get("content"):
+                return first_user["content"][:30]
+            return "新对话"
+
+    # =====================================================
     # 【流式聊天】—— SSE 逐 token 返回
     # =====================================================
     async def chat_stream(

@@ -341,6 +341,17 @@ export default {
     switchFailed: '切换对话失败',
     sendFailed: '发送失败',
     deleted: '对话已删除',
+    // ------ 会话标题管理 ------
+    renameSession: '重命名对话',
+    autoSummarize: 'AI 自动总结标题',
+    enterNewTitle: '请输入新的对话标题',
+    titleNotEmpty: '标题不能为空',
+    renameSuccess: '对话标题已更新',
+    renameFailed: '重命名失败',
+    deleteSession: '删除对话',
+    summarizing: 'AI 正在分析对话内容，生成标题...',
+    summarizeSuccess: '已自动生成标题',
+    summarizeFailed: '自动总结失败，请手动输入',
   },
 
   // ------ 首页加载 ------

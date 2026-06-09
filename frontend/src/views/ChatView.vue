@@ -31,13 +31,35 @@
             <span class="session-title">{{ session.title || t('chat.newChat') }}</span>
             <span class="session-time">{{ formatTime(session.updated_at) }}</span>
           </div>
-          <el-button
-            class="session-delete"
-            :icon="Delete"
-            size="small"
-            text
-            @click.stop="handleDeleteSession(session.id)"
-          />
+          <div class="session-actions">
+            <!-- AI 总结标题按钮 -->
+            <el-button
+              class="session-action-btn"
+              :icon="MagicStick"
+              size="small"
+              text
+              :title="t('chat.autoSummarize')"
+              @click.stop="handleAutoSummarize(session.id)"
+            />
+            <!-- 编辑标题按钮 -->
+            <el-button
+              class="session-action-btn"
+              :icon="Edit"
+              size="small"
+              text
+              :title="t('chat.renameSession')"
+              @click.stop="handleRenameSession(session)"
+            />
+            <!-- 删除按钮 -->
+            <el-button
+              class="session-action-btn"
+              :icon="Delete"
+              size="small"
+              text
+              :title="t('chat.deleteSession')"
+              @click.stop="handleDeleteSession(session.id)"
+            />
+          </div>
         </div>
 
         <div v-if="chatStore.sessions.length === 0" class="session-empty">
@@ -48,6 +70,27 @@
 
     <!-- 右侧：聊天区 -->
     <main class="chat-main">
+      <!-- 重命名会话对话框 -->
+      <el-dialog
+        v-model="renameDialogVisible"
+        :title="t('chat.renameSession')"
+        width="400px"
+        :close-on-click-modal="false"
+      >
+        <el-input
+          v-model="renameInput"
+          :placeholder="t('chat.enterNewTitle')"
+          maxlength="200"
+          show-word-limit
+          @keyup.enter="confirmRename"
+        />
+        <template #footer>
+          <el-button @click="renameDialogVisible = false">{{ t('common.cancel') }}</el-button>
+          <el-button type="primary" :disabled="!renameInput.trim()" @click="confirmRename">
+            {{ t('common.confirm') }}
+          </el-button>
+        </template>
+      </el-dialog>
       <!-- 无会话时的欢迎页 -->
       <div v-if="!chatStore.hasActiveSession" class="chat-welcome">
         <div class="welcome-icon">💬</div>
@@ -217,6 +260,7 @@ import { ref, onMounted, onActivated, nextTick, watch, computed } from 'vue'
 import {
   Plus, Delete, User, Monitor, Picture, VideoPlay,
   Loading, Check, WarningFilled, Promotion, ChatDotRound,
+  Edit, MagicStick,
 } from '@element-plus/icons-vue'
 import { useI18n } from '@/i18n'
 import { useChatStore } from '@/stores/chat'
@@ -229,6 +273,11 @@ const chatStore = useChatStore()
 const inputText = ref('')
 // 消息列表 DOM 引用
 const messagesRef = ref(null)
+
+// 重命名会话相关
+const renameDialogVisible = ref(false)
+const renameInput = ref('')
+const renamingSessionId = ref(null)
 
 // 快捷提示
 const quickTips = computed(() => [
@@ -293,6 +342,42 @@ async function handleDeleteSession(sessionId) {
     ElMessage.success(t('chat.deleted'))
   } catch (_) {
     // 取消删除
+  }
+}
+
+/** 重命名会话 - 打开对话框 */
+function handleRenameSession(session) {
+  renamingSessionId.value = session.id
+  renameInput.value = session.title || ''
+  renameDialogVisible.value = true
+}
+
+/** 重命名会话 - 确认修改 */
+async function confirmRename() {
+  const newTitle = renameInput.value.trim()
+  if (!newTitle) {
+    ElMessage.warning(t('chat.titleNotEmpty'))
+    return
+  }
+  try {
+    await chatStore.updateSessionTitle(renamingSessionId.value, newTitle)
+    ElMessage.success(t('chat.renameSuccess'))
+    renameDialogVisible.value = false
+    renameInput.value = ''
+    renamingSessionId.value = null
+  } catch (e) {
+    ElMessage.error(e.message || t('chat.renameFailed'))
+  }
+}
+
+/** AI 自动总结会话标题 */
+async function handleAutoSummarize(sessionId) {
+  try {
+    ElMessage.info(t('chat.summarizing'))
+    const updated = await chatStore.autoSummarizeSession(sessionId)
+    ElMessage.success(t('chat.summarizeSuccess') + ': ' + updated.title)
+  } catch (e) {
+    ElMessage.error(e.message || t('chat.summarizeFailed'))
   }
 }
 
@@ -502,8 +587,23 @@ function getImageIndex(mediaItems, currentIdx) {
   color: #8ba3c9 !important;
 }
 
-.session-item:hover .session-delete {
+.session-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.session-item:hover .session-actions {
   opacity: 1;
+}
+
+.session-action-btn {
+  color: #8ba3c9 !important;
+}
+
+.session-action-btn:hover {
+  color: #a0d4ff !important;
 }
 
 .session-empty {

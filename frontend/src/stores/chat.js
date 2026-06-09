@@ -17,6 +17,8 @@ import {
   getChatSessions,
   getChatSession,
   deleteChatSession,
+  updateChatSession,
+  summarizeChatSession,
   getChatMessages,
   sendMessageStream,
   getMediaStatus,
@@ -155,6 +157,42 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
+    /** 修改会话标题 */
+    async updateSessionTitle(sessionId, newTitle) {
+      try {
+        const updated = await updateChatSession(sessionId, newTitle)
+        // 更新本地 sessions 列表
+        const session = this.sessions.find(s => s.id === sessionId)
+        if (session) {
+          session.title = updated.title
+          session.updated_at = updated.updated_at
+        }
+        this._saveToStorage()
+        return updated
+      } catch (e) {
+        console.error('[Chat] 修改会话标题失败:', e)
+        throw e
+      }
+    },
+
+    /** 使用 AI 自动总结会话主题（生成新标题） */
+    async autoSummarizeSession(sessionId) {
+      try {
+        const updated = await summarizeChatSession(sessionId)
+        // 更新本地 sessions 列表
+        const session = this.sessions.find(s => s.id === sessionId)
+        if (session) {
+          session.title = updated.title
+          session.updated_at = updated.updated_at
+        }
+        this._saveToStorage()
+        return updated
+      } catch (e) {
+        console.error('[Chat] 自动总结会话失败:', e)
+        throw e
+      }
+    },
+
     /** 加载会话消息（从数据库恢复，含 media_items） */
     async loadMessages(sessionId) {
       if (!sessionId) return
@@ -187,8 +225,8 @@ export const useChatStore = defineStore('chat', {
     /** 发送消息并处理流式响应 */
     async sendMessage(content) {
       if (!this.activeSessionId) {
-        // 自动创建新会话
-        const session = await this.newSession(content.slice(0, 30))
+        // 自动创建新会话（标题用默认的"新对话"，等 AI 回复完成后自动总结）
+        await this.newSession()
       }
 
       if (!content.trim()) return
@@ -406,6 +444,16 @@ export const useChatStore = defineStore('chat', {
             if (!doneMsg.content) {
               doneMsg.content = this.streamingContent
             }
+          }
+          break
+        }
+
+        case 'title_updated': {
+          // AI 自动总结了会话主题，更新左侧会话列表
+          const session = this.sessions.find(s => s.id === this.activeSessionId)
+          if (session && event.title) {
+            session.title = event.title
+            session.updated_at = new Date().toISOString()
           }
           break
         }

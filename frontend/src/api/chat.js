@@ -48,6 +48,23 @@ export function deleteChatSession(sessionId) {
   return client.delete(`/api/chat/sessions/${sessionId}`)
 }
 
+/**
+ * 修改会话标题
+ * @param {number} sessionId
+ * @param {string} title - 新的会话标题
+ */
+export function updateChatSession(sessionId, title) {
+  return client.put(`/api/chat/sessions/${sessionId}`, { title })
+}
+
+/**
+ * 使用 AI 自动总结会话主题（生成新标题）
+ * @param {number} sessionId
+ */
+export function summarizeChatSession(sessionId) {
+  return client.post(`/api/chat/sessions/${sessionId}/summarize`)
+}
+
 // =====================================================
 // 消息
 // =====================================================

@@ -340,6 +340,17 @@ export default {
     switchFailed: 'Failed to switch conversation',
     sendFailed: 'Failed to send',
     deleted: 'Conversation deleted',
+    // ------ Session title management ------
+    renameSession: 'Rename conversation',
+    autoSummarize: 'AI auto-summarize title',
+    enterNewTitle: 'Enter new conversation title',
+    titleNotEmpty: 'Title cannot be empty',
+    renameSuccess: 'Conversation title updated',
+    renameFailed: 'Rename failed',
+    deleteSession: 'Delete conversation',
+    summarizing: 'AI is analyzing the conversation to generate a title...',
+    summarizeSuccess: 'Title auto-generated',
+    summarizeFailed: 'Auto-summarize failed, please enter manually',
   },
 
   // ------ First-page loading ------
