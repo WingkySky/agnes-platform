@@ -149,5 +149,8 @@ export function getMediaStatus(taskId) {
  * @param {string} [params.status='success'] - 状态：success / failed
  */
 export function mediaCallback({ message_id, task_id, media_url, status = 'success' }) {
-  return client.post('/api/chat/media-callback', { message_id, task_id, media_url, status })
+  return client.post('/api/chat/media-callback',
+    { message_id, task_id, media_url, status },
+    { silent: true }  // 静默模式：即使后端返回错误也不弹窗（由上层处理）
+  )
 }

@@ -54,6 +54,10 @@ export const useChatStore = defineStore('chat', {
     mediaStatusMap: {},
     // 媒体轮询连续失败计数（taskId -> count）
     mediaPollFailCounts: {},
+    // 任务ID -> 消息ID 映射（关键：解决临时 ID / 真实 ID 异步冲突）
+    // 消息刚创建时 msg.id 是 Date.now() 临时值；收到 assistant_message 事件后才变为真实 DB ID
+    // 但媒体轮询回调需要真实 message_id，因此轮询完成时通过此映射查找当前正确的 message.id
+    mediaTaskToMessageId: {},
     // AbortController（用于取消流式请求）
     _abortController: null,
   }),
@@ -104,6 +108,10 @@ export const useChatStore = defineStore('chat', {
     async switchSession(sessionId) {
       // 取消当前流式请求
       this._abortStream()
+      // 停止旧会话的所有媒体轮询，避免切换后继续调用旧 message.id（临时 ID）
+      this.stopAllMediaPolls()
+      // 清空临时 ID 映射
+      this.mediaTaskToMessageId = {}
 
       this.activeSessionId = sessionId
       this.messages = []
@@ -193,6 +201,7 @@ export const useChatStore = defineStore('chat', {
       this._abortController = new AbortController()
 
       // 添加 AI 消息占位（流式更新）
+      // 注意：id 先用 Date.now() 临时值，收到 assistant_message SSE 事件后更新为真实 DB ID
       const assistantMsg = {
         id: Date.now() + 1,
         session_id: this.activeSessionId,
@@ -201,6 +210,7 @@ export const useChatStore = defineStore('chat', {
         media_items: [],  // 使用 media_items 数组
         created_at: new Date().toISOString(),
         _streaming: true, // 标记正在流式更新
+        _tempId: true,    // 标记 id 是临时值（媒体回写需等待真实 ID）
       }
       this.messages.push(assistantMsg)
 
@@ -299,16 +309,46 @@ export const useChatStore = defineStore('chat', {
 
         case 'assistant_message': {
           // AI 消息已保存到数据库（更新 ID 和完整信息）
+          // 关键修复：更新 id 后移除 _tempId 标记，并同步更新 mediaTaskToMessageId 映射
           if (event.message) {
             const lastMsg = this.messages[this.messages.length - 1]
             if (lastMsg && lastMsg.role === 'assistant') {
+              const previousId = lastMsg.id
               lastMsg.id = event.message.id
               lastMsg.content = event.message.content || this.streamingContent
               // 从数据库恢复 media_items（确保与后端一致）
-              if (event.message.media_items) {
+              if (event.message.media_items && event.message.media_items.length) {
                 lastMsg.media_items = event.message.media_items
               }
               lastMsg._streaming = false
+              lastMsg._tempId = false  // 清除临时 ID 标记
+
+              // 同步更新 mediaTaskToMessageId 映射（轮询完成后的回写需要真实 ID）
+              if (lastMsg.media_items && Array.isArray(lastMsg.media_items)) {
+                for (const item of lastMsg.media_items) {
+                  if (item.task_id) {
+                    this.mediaTaskToMessageId[item.task_id] = event.message.id
+                  }
+                }
+              }
+
+              // 对已完成（success / failed）但因临时 ID 未能回写的媒体项，
+              // 现在消息 ID 已更新，立即重试回写数据库
+              for (const item of lastMsg.media_items || []) {
+                if (item.task_id && (item.status === 'success' || item.status === 'failed')) {
+                  if (!this._pendingCallbackIds) this._pendingCallbackIds = new Set()
+                  if (this._pendingCallbackIds.has(item.task_id)) continue
+                  this._pendingCallbackIds.add(item.task_id)
+                  // 延迟一点确保响应式更新完成
+                  setTimeout(() => {
+                    if (item.status === 'success' && item.url) {
+                      this._mediaCallbackToDB(event.message.id, item.task_id, item.url, 'success')
+                    } else if (item.status === 'failed') {
+                      this._mediaCallbackToDB(event.message.id, item.task_id, '', 'failed')
+                    }
+                  }, 0)
+                }
+              }
             }
           }
           break
@@ -368,6 +408,9 @@ export const useChatStore = defineStore('chat', {
     _startMediaPoll(taskId, messageId) {
       if (this.mediaPollTimers[taskId]) return
 
+      // 建立 taskId -> messageId 映射（初始值，收到 assistant_message 后会更新）
+      this.mediaTaskToMessageId[taskId] = messageId
+
       // 重置失败计数
       this.mediaPollFailCounts[taskId] = 0
 
@@ -378,7 +421,7 @@ export const useChatStore = defineStore('chat', {
           this.mediaPollFailCounts[taskId] = 0
           this.mediaStatusMap[taskId] = data
 
-          // 更新消息中的 media_items
+          // 关键修复：总是从 this.messages 中动态查找消息（避免使用闭包捕获的临时 ID）
           const msg = this.messages.find(m => {
             if (!m.media_items) return false
             return m.media_items.some(item => item.task_id === taskId)
@@ -386,41 +429,44 @@ export const useChatStore = defineStore('chat', {
 
           if (msg) {
             const item = msg.media_items.find(i => i.task_id === taskId)
-            if (item) {
-              const rawStatus = String(data.status || '').toLowerCase()
-              const isSuccess = ['success', 'completed', 'done', 'succeeded', 'finished'].includes(rawStatus)
-              const isFailed = ['failed', 'error', 'timeout'].includes(rawStatus)
-              const isUnknown = rawStatus === 'unknown'
+            if (!item) return
 
-              if (isSuccess) {
-                item.status = 'success'
-                item.url = data.result_url || data.video_url || data.url || data.image_url || ''
-                this._stopMediaPoll(taskId)
-                // 回写数据库，确保刷新后也能看到
-                if (msg.id && item.url) {
-                  this._mediaCallbackToDB(msg.id, taskId, item.url, 'success')
-                }
-                // 同步更新任务队列
-                this._updateTaskQueueItem(taskId, 'success', item.url)
-              } else if (isFailed) {
-                item.status = 'failed'
-                this._stopMediaPoll(taskId)
-                // 回写数据库
-                if (msg.id) {
-                  this._mediaCallbackToDB(msg.id, taskId, '', 'failed')
-                }
-                // 同步更新任务队列
-                this._updateTaskQueueItem(taskId, 'failed', '')
-              } else if (isUnknown) {
-                // 任务已过期或不存在，停止轮询
-                console.warn('[Chat] 任务不存在或已过期，停止轮询: taskId=%s', taskId)
-                this._stopMediaPoll(taskId)
-                if (item.status !== 'success') {
-                  item.status = 'failed'
-                }
-              } else {
-                item.status = 'processing'
+            const rawStatus = String(data.status || '').toLowerCase()
+            const isSuccess = ['success', 'completed', 'done', 'succeeded', 'finished'].includes(rawStatus)
+            const isFailed = ['failed', 'error', 'timeout'].includes(rawStatus)
+            const isUnknown = rawStatus === 'unknown'
+
+            if (isSuccess) {
+              item.status = 'success'
+              item.url = data.result_url || data.video_url || data.url || data.image_url || ''
+              this._stopMediaPoll(taskId)
+
+              // 关键修复：只有当消息 ID 是真实数据库 ID（非临时 Date.now()）时才执行回写
+              // msg._tempId === true 表示 assistant_message 事件尚未到达，暂不回写
+              // （assistant_message 事件到达后会重新检查已完成项并回写）
+              if (item.url && !msg._tempId) {
+                this._mediaCallbackToDB(msg.id, taskId, item.url, 'success')
               }
+              // 同步更新任务队列
+              this._updateTaskQueueItem(taskId, 'success', item.url)
+            } else if (isFailed) {
+              item.status = 'failed'
+              this._stopMediaPoll(taskId)
+              // 失败状态同样需要真实 message_id 才能回写
+              if (!msg._tempId) {
+                this._mediaCallbackToDB(msg.id, taskId, '', 'failed')
+              }
+              // 同步更新任务队列
+              this._updateTaskQueueItem(taskId, 'failed', '')
+            } else if (isUnknown) {
+              // 任务已过期或不存在，停止轮询
+              console.warn('[Chat] 任务不存在或已过期，停止轮询: taskId=%s', taskId)
+              this._stopMediaPoll(taskId)
+              if (item.status !== 'success') {
+                item.status = 'failed'
+              }
+            } else {
+              item.status = 'processing'
             }
           }
         } catch (e) {
@@ -470,8 +516,9 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
-    /** 媒体回调 — 回写数据库 */
+    /** 媒体回调 — 回写数据库（健壮处理：404/网络异常不再弹错，仅记录） */
     async _mediaCallbackToDB(messageId, taskId, mediaUrl, status) {
+      if (!messageId || !taskId) return
       try {
         await mediaCallback({
           message_id: messageId,
@@ -481,7 +528,11 @@ export const useChatStore = defineStore('chat', {
         })
         console.log('[Chat] 媒体回写成功: msg=%s, task=%s', messageId, taskId)
       } catch (e) {
-        console.warn('[Chat] 媒体回写失败:', e.message)
+        // 仅打印警告，不弹出错误
+        // 404（消息不存在）通常是因为临时 ID 问题（已通过 _tempId 机制提前避免）
+        // 但为了极端情况（如消息被删除）仍能优雅处理，这里只记录
+        console.warn('[Chat] 媒体回写跳过: msg=%s, task=%s, reason=%s',
+          messageId, taskId, e.message || 'unknown')
       }
     },
 
