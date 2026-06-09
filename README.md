@@ -1,5 +1,7 @@
 # 🎨 Agnes AI Platform · Image & Video Generation Platform
 
+![GitHub Stars](https://img.shields.io/github/stars/your-username/agnes-platform?style=social) ![GitHub Forks](https://img.shields.io/github/forks/your-username/agnes-platform?style=social) ![License](https://img.shields.io/badge/license-MIT-blue) ![Python](https://img.shields.io/badge/python-3776AB?logo=python&logoColor=white) ![JavaScript](https://img.shields.io/badge/javascript-F7DF1E?logo=javascript&logoColor=black) ![Vue](https://img.shields.io/badge/vue-4FC08D?logo=vuedotjs&logoColor=white) ![Shell](https://img.shields.io/badge/shell-4EAA25?logo=gnubash&logoColor=white) ![Markdown](https://img.shields.io/badge/markdown-000000?logo=markdown&logoColor=white)
+
 **Frontend (Vue 3 + Vite)**  | **Backend (FastAPI + Async)**  | **SQLite / PostgreSQL**  | **Agnes AI API Integration**  | **Auto-Polling**
 
 **🌐 Language / 语言**
