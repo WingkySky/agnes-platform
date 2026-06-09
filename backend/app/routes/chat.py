@@ -21,7 +21,7 @@
 import logging
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
@@ -658,7 +658,7 @@ async def get_media_status(task_id: str):
 
     # 最后查数据库
     try:
-        async with get_async_db() as db:
+        async with async_session() as db:
             from app.models.generation import Generation
             result = await db.execute(
                 select(Generation).filter(Generation.task_id == task_id)
