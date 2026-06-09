@@ -397,7 +397,6 @@ async function loadList(resetPage = false) {
     // 使用后端返回的全局类型计数（不受筛选条件和分页影响）
     imageCount.value = data.total_image_count ?? 0
     videoCount.value = data.total_video_count ?? 0
-    console.log('[History] 加载完成：共 ' + list.value.length + ' 条记录（视频 ' + videoCount.value + ' 条）')
     // 自动加载视频首帧缩略图（不阻塞列表渲染）
     list.value.filter(i => i.type === 'video').forEach(item => {
       loadVideoThumbnail(item)
@@ -426,7 +425,6 @@ function showDetail(item) {
   detailVideoLoading.value = item.type === 'video' && !!item.result_url
   detailVideoFailed.value = false
   detailVisible.value = true
-  console.log('[History] 打开详情：', item)
 }
 
 // ---------- 编辑 / 多选删除方法 ----------

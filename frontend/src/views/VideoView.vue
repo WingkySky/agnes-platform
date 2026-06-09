@@ -348,14 +348,8 @@ const videoUrl = computed(() => {
   // 优先使用后端代理接口播放视频（通过 task_id 代理，避免 CORS）
   const backendTaskId = activeTask.value.backendTaskId || activeTask.value.taskId
   const status = activeTask.value.status
-  console.log('[VideoView] videoUrl 计算:', {
-    backendTaskId,
-    status,
-    resultUrl: activeTask.value.resultUrl?.substring(0, 60),
-  })
   if (backendTaskId && status === 'success') {
     const proxyUrl = `/api/videos/${backendTaskId}/stream`
-    console.log('[VideoView] 使用代理 URL:', proxyUrl)
     return proxyUrl
   }
   // 任务未完成时返回空（不使用直链）
@@ -454,7 +448,6 @@ async function startGenerate() {
   }
 
   try {
-    console.log('[VideoView] 提交视频任务，参数：', params)
     const taskId = await queue.submitVideoTask(params)
     queue.setActiveTask(taskId)  // 提交后自动选中新任务 → 预览区立即显示
     ElMessage.success('视频任务已提交，可点击右下「队列」查看所有任务')
@@ -564,8 +557,8 @@ function capturePoster() {
     console.warn('[VideoView] canvas 截图失败：', e)
   }
 }
-function onVideoLoaded() { console.log('[VideoView] 视频元数据已加载') }
-function onVideoCanPlay() { console.log('[VideoView] 视频可播放') }
+function onVideoLoaded() { /* 视频元数据已加载 */ }
+function onVideoCanPlay() { /* 视频可播放 */ }
 function handleVideoError(e) {
   console.error('[VideoView] 视频播放失败：', e)
   ElMessage.error('视频加载失败，请尝试「下载」或「新标签页打开」')

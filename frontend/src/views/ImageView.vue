@@ -367,7 +367,6 @@ async function handleGenerate() {
   }
 
   try {
-    console.log('[ImageView] 提交图片任务，参数：', params)
     const taskId = await queue.submitImageTask(params)
     queue.setActiveTask(taskId)  // 提交后自动选中新任务 → 预览区立即显示
     ElMessage.success('图片任务已提交，可点击右下「队列」查看所有任务')
