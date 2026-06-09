@@ -7,16 +7,20 @@
 # DELETE /api/chat/sessions/{id}         - 删除会话
 # POST   /api/chat/sessions/{id}/messages - 发送消息（SSE 流式响应）
 # GET    /api/chat/sessions/{id}/messages - 获取会话消息列表
+# POST   /api/chat/media-callback        - 媒体生成完成回调（更新消息中的 media_items）
 # GET    /api/chat/media-status/{task_id} - 查询媒体生成状态
 #
 # 关键设计：
 #   - 发送消息使用 SSE（Server-Sent Events）流式返回 AI 回复
 #   - 工具调用（生图/生视频）结果通过 SSE 事件实时推送
 #   - 消息持久化到数据库，刷新页面后可恢复历史
+#   - 媒体项使用 media_items JSON 数组，支持多图/多视频
+#   - 媒体生成完成后，前端通过回调接口更新消息的 media_items
 # =====================================================
 
 import logging
 import json
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -24,7 +28,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 
 from app.core.database import get_async_db
 from app.core.config import settings
@@ -51,25 +55,12 @@ class SendMessageRequest(BaseModel):
     content: str = Field(..., min_length=1, description="消息内容")
 
 
-class SessionResponse(BaseModel):
-    """会话响应"""
-    id: int
-    title: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-
-
-class MessageResponse(BaseModel):
-    """消息响应"""
-    id: int
-    session_id: int
-    role: str
-    content: str
-    media_type: Optional[str] = None
-    media_url: Optional[str] = None
-    media_task_id: Optional[str] = None
-    media_status: Optional[str] = None
-    created_at: Optional[str] = None
+class MediaCallbackRequest(BaseModel):
+    """媒体生成完成回调请求"""
+    message_id: int = Field(..., description="消息 ID")
+    task_id: str = Field(..., description="生成任务 ID")
+    media_url: str = Field(..., description="生成完成的资源 URL")
+    status: str = Field(default="success", description="状态：success / failed")
 
 
 # =====================================================
@@ -100,7 +91,6 @@ async def list_sessions(
 ):
     """获取会话列表，按更新时间倒序"""
     # 总数
-    from sqlalchemy import func
     count_result = await db.execute(select(func.count()).select_from(ChatSession))
     total = count_result.scalar_one() or 0
 
@@ -182,6 +172,72 @@ async def get_messages(
         .order_by(ChatMessage.id)
     )
     messages = result.scalars().all()
+
+    # 对每条消息，检查 media_items 中 pending 状态的任务是否已完成
+    # 如果已完成，更新 media_items 中的 url 和 status
+    for msg in messages:
+        if msg.media_items:
+            updated = False
+            for item in msg.media_items:
+                if item.get("status") in ("pending", "processing") and item.get("task_id"):
+                    # 查询任务状态
+                    task_id = item["task_id"]
+                    result_url = None
+                    new_status = None
+
+                    # 尝试图片任务
+                    img_task = await image_poller_manager.get_status(task_id)
+                    if img_task:
+                        d = img_task.to_dict()
+                        if d.get("status") in ("success", "completed", "done"):
+                            result_url = d.get("result_url") or d.get("url")
+                            new_status = "success"
+                        elif d.get("status") in ("failed", "error"):
+                            new_status = "failed"
+
+                    # 尝试视频任务
+                    if not result_url and not new_status:
+                        vid_task = await video_poller_manager.get_status(task_id=task_id)
+                        if not vid_task:
+                            vid_task = await video_poller_manager.get_status(video_id=task_id)
+                        if vid_task:
+                            d = vid_task.to_dict()
+                            if d.get("status") in ("success", "completed", "done"):
+                                result_url = d.get("video_url") or d.get("url")
+                                new_status = "success"
+                            elif d.get("status") in ("failed", "error"):
+                                new_status = "failed"
+
+                    # 回退查数据库
+                    if not result_url and not new_status:
+                        try:
+                            from app.models.generation import Generation
+                            gen_result = await db.execute(
+                                select(Generation).filter(Generation.task_id == task_id)
+                            )
+                            gen_record = gen_result.scalar_one_or_none()
+                            if gen_record:
+                                if gen_record.status == "success":
+                                    result_url = gen_record.result_url
+                                    new_status = "success"
+                                elif gen_record.status == "failed":
+                                    new_status = "failed"
+                        except Exception:
+                            pass
+
+                    # 更新 media_item
+                    if result_url or new_status:
+                        if result_url:
+                            item["url"] = result_url
+                        if new_status:
+                            item["status"] = new_status
+                        updated = True
+
+            # 如果有更新，写回数据库
+            if updated:
+                msg.media_items = list(msg.media_items)  # 触发 SQLAlchemy 检测变更
+                await db.commit()
+
     return {"items": [m.to_dict() for m in messages]}
 
 
@@ -230,7 +286,7 @@ async def send_message(
         session.title = req.content[:30] + ("..." if len(req.content) > 30 else "")
 
     # 更新会话时间
-    session.updated_at = __import__("datetime").datetime.utcnow()
+    session.updated_at = datetime.utcnow()
     await db.commit()
     await db.refresh(user_msg)
 
@@ -256,10 +312,8 @@ async def send_message(
 
         # 收集 AI 回复内容
         assistant_content = ""
-        media_type = None
-        media_url = None
-        media_task_id = None
-        media_status = None
+        # 收集所有媒体项（支持多个）
+        media_items = []
         tool_calls_info = []
 
         try:
@@ -273,11 +327,18 @@ async def send_message(
                         assistant_content += event.get("content", "")
                     elif event.get("type") == "tool_result":
                         result_data = event.get("result", {})
-                        media_type = result_data.get("media_type")
-                        media_task_id = result_data.get("task_id") or result_data.get("video_id")
-                        media_status = result_data.get("status")
+                        tool_name = event.get("tool", "")
+                        # 为每个工具调用结果创建一个 media_item
+                        if result_data.get("media_type") and result_data.get("status") != "error":
+                            media_item = {
+                                "type": result_data.get("media_type"),
+                                "url": result_data.get("url", ""),
+                                "task_id": result_data.get("task_id") or result_data.get("video_id", ""),
+                                "status": result_data.get("status", "pending"),
+                            }
+                            media_items.append(media_item)
                         tool_calls_info.append({
-                            "tool": event.get("tool"),
+                            "tool": tool_name,
                             "result": result_data,
                         })
                 except (json.JSONDecodeError, KeyError):
@@ -289,35 +350,27 @@ async def send_message(
 
         # 保存 AI 回复到数据库
         try:
-            assistant_msg = ChatMessage(
-                session_id=session_id,
-                role="assistant",
-                content=assistant_content,
-                media_type=media_type,
-                media_url=media_url,
-                media_task_id=media_task_id,
-                media_status=media_status or ("pending" if media_type else None),
-                tool_calls=tool_calls_info if tool_calls_info else None,
-            )
-            db_new = None
-            try:
-                # 使用新的 db session（因为当前请求的 session 可能已关闭）
-                async with get_async_db() as db_new:
-                    db_new.add(assistant_msg)
-                    # 更新会话时间
-                    session_result = await db_new.execute(
-                        select(ChatSession).filter(ChatSession.id == session_id)
-                    )
-                    session_obj = session_result.scalar_one_or_none()
-                    if session_obj:
-                        session_obj.updated_at = __import__("datetime").datetime.utcnow()
-                    await db_new.commit()
-                    await db_new.refresh(assistant_msg)
-            except Exception as db_err:
-                logger.warning("[Chat] 保存 AI 回复失败: %s", db_err)
+            async with get_async_db() as db_new:
+                assistant_msg = ChatMessage(
+                    session_id=session_id,
+                    role="assistant",
+                    content=assistant_content,
+                    media_items=media_items if media_items else [],
+                    tool_calls=tool_calls_info if tool_calls_info else None,
+                )
+                db_new.add(assistant_msg)
+                # 更新会话时间
+                session_result = await db_new.execute(
+                    select(ChatSession).filter(ChatSession.id == session_id)
+                )
+                session_obj = session_result.scalar_one_or_none()
+                if session_obj:
+                    session_obj.updated_at = datetime.utcnow()
+                await db_new.commit()
+                await db_new.refresh(assistant_msg)
 
-            # 发送保存确认
-            yield f"data: {json.dumps({'type': 'assistant_message', 'message': assistant_msg.to_dict()}, ensure_ascii=False)}\n\n"
+                # 发送保存确认
+                yield f"data: {json.dumps({'type': 'assistant_message', 'message': assistant_msg.to_dict()}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error("[Chat] 保存 AI 回复异常: %s", e)
 
@@ -332,6 +385,47 @@ async def send_message(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# =====================================================
+# 媒体回调接口 — 前端轮询到结果后调用此接口更新消息
+# =====================================================
+
+@router.post("/chat/media-callback", summary="媒体生成完成回调")
+async def media_callback(
+    req: MediaCallbackRequest,
+    db: AsyncSession = Depends(get_async_db),
+):
+    """
+    前端检测到媒体生成完成后，调用此接口更新消息中的 media_items。
+    这样刷新页面后也能看到已生成的媒体资源。
+    """
+    result = await db.execute(
+        select(ChatMessage).filter(ChatMessage.id == req.message_id)
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=404, detail="消息不存在")
+
+    # 更新 media_items 中对应 task_id 的项
+    if msg.media_items:
+        updated = False
+        for item in msg.media_items:
+            if item.get("task_id") == req.task_id:
+                item["url"] = req.media_url
+                item["status"] = req.status
+                updated = True
+                break
+
+        if updated:
+            # 触发 SQLAlchemy 检测 JSON 字段变更
+            msg.media_items = list(msg.media_items)
+            await db.commit()
+            logger.info("[Chat] 媒体回调更新: message_id=%s, task_id=%s, status=%s",
+                        req.message_id, req.task_id, req.status)
+            return {"success": True, "message": "媒体状态已更新"}
+
+    return {"success": False, "message": "未找到对应的媒体项"}
 
 
 # =====================================================
@@ -374,4 +468,10 @@ async def get_media_status(task_id: str):
     except Exception as e:
         logger.warning("[Chat] 数据库查询媒体状态失败: %s", e)
 
-    raise HTTPException(status_code=404, detail=f"未找到任务（ID: {task_id}）")
+    # 任务不在内存中也不在数据库中，返回 unknown 状态而非 404
+    # 前端收到 unknown 后会停止轮询，避免无限 404 循环
+    return {
+        "task_id": task_id,
+        "status": "unknown",
+        "message": "任务已过期或不存在，请停止轮询",
+    }

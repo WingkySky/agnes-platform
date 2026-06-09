@@ -129,7 +129,7 @@ export async function sendMessageStream(sessionId, content, onEvent, signal) {
 }
 
 // =====================================================
-// 媒体生成状态
+// 媒体生成状态 & 回调
 // =====================================================
 
 /**
@@ -138,4 +138,16 @@ export async function sendMessageStream(sessionId, content, onEvent, signal) {
  */
 export function getMediaStatus(taskId) {
   return client.get(`/api/chat/media-status/${taskId}`, { silent: true })
+}
+
+/**
+ * 媒体生成完成回调 — 前端轮询到结果后调用此接口更新数据库中的 media_items
+ * @param {Object} params
+ * @param {number} params.message_id - 消息 ID
+ * @param {string} params.task_id - 生成任务 ID
+ * @param {string} params.media_url - 生成完成的资源 URL
+ * @param {string} [params.status='success'] - 状态：success / failed
+ */
+export function mediaCallback({ message_id, task_id, media_url, status = 'success' }) {
+  return client.post('/api/chat/media-callback', { message_id, task_id, media_url, status })
 }

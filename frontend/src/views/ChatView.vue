@@ -5,6 +5,8 @@
      - 右侧：聊天消息区 + 输入框
      - 支持流式文本回复（逐字显示）
      - 支持图片/视频生成（工具调用，内嵌展示）
+     - 支持多图/多视频展示（media_items 数组）
+     - 页面切换后状态保持（从数据库恢复）
      - 自动滚动到最新消息
      ===================================================== -->
 
@@ -96,8 +98,8 @@
                 <!-- 流式输入光标 -->
                 <span v-if="msg._streaming" class="streaming-cursor">▊</span>
 
-                <!-- 工具调用提示 -->
-                <div v-for="tc in getToolCallsForMessage(msg)" :key="tc.tool" class="tool-call-badge">
+                <!-- 工具调用提示（流式阶段显示） -->
+                <div v-for="tc in getToolCallsForMessage(msg)" :key="tc.tool + tc.args?.prompt" class="tool-call-badge">
                   <el-icon v-if="tc.tool === 'generate_image'"><Picture /></el-icon>
                   <el-icon v-else-if="tc.tool === 'generate_video'"><VideoPlay /></el-icon>
                   <span>{{ tc.tool === 'generate_image' ? t('chat.generatingImage') : t('chat.generatingVideo') }}</span>
@@ -105,47 +107,69 @@
                   <el-icon v-else-if="tc.status === 'done'" class="tool-done"><Check /></el-icon>
                 </div>
 
-                <!-- 媒体内容（图片） -->
-                <div v-if="msg.media_type === 'image' && msg.media_url" class="media-container">
-                  <el-image
-                    :src="msg.media_url"
-                    :preview-src-list="[msg.media_url]"
-                    fit="contain"
-                    class="media-image"
-                    :preview-teleported="true"
+                <!-- 媒体内容（遍历 media_items 数组，支持多图/多视频） -->
+                <template v-if="msg.media_items && msg.media_items.length > 0">
+                  <div
+                    v-for="(item, idx) in msg.media_items"
+                    :key="item.task_id || idx"
+                    class="media-container"
                   >
-                    <template #error>
-                      <div class="media-loading">
+                    <!-- 图片 -->
+                    <template v-if="item.type === 'image'">
+                      <!-- 图片已生成完成 -->
+                      <el-image
+                        v-if="item.url && item.status === 'success'"
+                        :src="item.url"
+                        :preview-src-list="getAllImageUrls(msg.media_items)"
+                        :initial-index="getImageIndex(msg.media_items, idx)"
+                        fit="contain"
+                        class="media-image"
+                        :preview-teleported="true"
+                      >
+                        <template #error>
+                          <div class="media-loading">
+                            <el-icon class="is-loading"><Loading /></el-icon>
+                            <span>{{ t('chat.mediaLoading') }}</span>
+                          </div>
+                        </template>
+                      </el-image>
+                      <!-- 图片生成中 -->
+                      <div v-else-if="item.status === 'pending' || item.status === 'processing'" class="media-generating">
                         <el-icon class="is-loading"><Loading /></el-icon>
-                        <span>{{ t('chat.mediaLoading') }}</span>
+                        <span>{{ t('chat.imageGenerating') }}</span>
+                      </div>
+                      <!-- 图片生成失败 -->
+                      <div v-else-if="item.status === 'failed'" class="media-failed">
+                        <el-icon><WarningFilled /></el-icon>
+                        <span>{{ t('chat.mediaFailed') }}</span>
                       </div>
                     </template>
-                  </el-image>
-                </div>
 
-                <!-- 媒体内容（视频） -->
-                <div v-if="msg.media_type === 'video' && msg.media_url" class="media-container">
-                  <video
-                    :src="getVideoProxyUrl(msg.media_url, msg.media_task_id)"
-                    controls
-                    class="media-video"
-                    @error="onVideoError"
-                  >
-                    {{ t('chat.videoNotSupported') }}
-                  </video>
-                </div>
-
-                <!-- 媒体生成中 -->
-                <div v-if="msg.media_type && msg.media_status === 'pending' && !msg.media_url" class="media-generating">
-                  <el-icon class="is-loading"><Loading /></el-icon>
-                  <span>{{ msg.media_type === 'image' ? t('chat.imageGenerating') : t('chat.videoGenerating') }}</span>
-                </div>
-
-                <!-- 媒体生成失败 -->
-                <div v-if="msg.media_type && msg.media_status === 'failed'" class="media-failed">
-                  <el-icon><WarningFilled /></el-icon>
-                  <span>{{ t('chat.mediaFailed') }}</span>
-                </div>
+                    <!-- 视频 -->
+                    <template v-if="item.type === 'video'">
+                      <!-- 视频已生成完成 -->
+                      <video
+                        v-if="item.url && item.status === 'success'"
+                        :src="getVideoProxyUrl(item.url, item.task_id)"
+                        controls
+                        class="media-video"
+                        @error="onVideoError"
+                      >
+                        {{ t('chat.videoNotSupported') }}
+                      </video>
+                      <!-- 视频生成中 -->
+                      <div v-else-if="item.status === 'pending' || item.status === 'processing'" class="media-generating">
+                        <el-icon class="is-loading"><Loading /></el-icon>
+                        <span>{{ t('chat.videoGenerating') }}</span>
+                      </div>
+                      <!-- 视频生成失败 -->
+                      <div v-else-if="item.status === 'failed'" class="media-failed">
+                        <el-icon><WarningFilled /></el-icon>
+                        <span>{{ t('chat.mediaFailed') }}</span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
               </div>
             </div>
           </div>
@@ -214,7 +238,8 @@ const quickTips = computed(() => [
 // 生命周期
 // =====================================================
 onMounted(async () => {
-  await chatStore.loadSessions()
+  // 使用 init() 初始化（从 localStorage 恢复 + 从数据库加载消息）
+  await chatStore.init()
 })
 
 // 监听消息变化，自动滚动到底部
@@ -355,6 +380,23 @@ function getVideoProxyUrl(url, taskId) {
 /** 视频加载失败 */
 function onVideoError(e) {
   console.warn('[Chat] 视频加载失败')
+}
+
+/** 获取消息中所有图片 URL（用于图片预览） */
+function getAllImageUrls(mediaItems) {
+  if (!mediaItems) return []
+  return mediaItems
+    .filter(item => item.type === 'image' && item.url && item.status === 'success')
+    .map(item => item.url)
+}
+
+/** 获取当前图片在预览列表中的索引 */
+function getImageIndex(mediaItems, currentIdx) {
+  if (!mediaItems) return 0
+  const imageItems = mediaItems.filter(item => item.type === 'image' && item.url && item.status === 'success')
+  const currentItem = mediaItems[currentIdx]
+  const idx = imageItems.indexOf(currentItem)
+  return idx >= 0 ? idx : 0
 }
 </script>
 

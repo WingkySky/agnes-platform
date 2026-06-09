@@ -5,7 +5,8 @@
 # 设计说明：
 #   - 每个会话包含多条消息，通过 session_id 关联
 #   - 消息角色：user（用户）、assistant（AI 助手）、system（系统）
-#   - 消息可携带媒体内容（生成的图片/视频），通过 media_type 和 media_url 字段存储
+#   - 消息可携带多个媒体内容（图片/视频），通过 media_items JSON 数组存储
+#   - 每个媒体项包含：type、url、task_id、status
 #   - 支持流式响应的增量内容拼接（content 字段逐步追加）
 # =====================================================
 
@@ -63,10 +64,13 @@ class ChatMessage(Base):
     - session_id: 所属会话 ID
     - role: 消息角色（user / assistant / system）
     - content: 文本内容
-    - media_type: 媒体类型（image / video / None）
-    - media_url: 媒体资源 URL（图片/视频的访问地址）
-    - media_task_id: 媒体生成任务 ID（用于轮询生成状态）
-    - media_status: 媒体生成状态（pending / processing / success / failed）
+    - media_items: 媒体项列表（JSON 数组），每项格式：
+        {
+          "type": "image" | "video",
+          "url": "https://...",       # 生成完成后的资源 URL
+          "task_id": "img_xxx",       # 生成任务 ID（用于轮询状态）
+          "status": "pending" | "processing" | "success" | "failed"
+        }
     - tool_calls: 工具调用信息（JSON 格式，记录 AI 发起的工具调用）
     - created_at: 创建时间
     """
@@ -76,11 +80,8 @@ class ChatMessage(Base):
     session_id = Column(Integer, ForeignKey("chat_sessions.id"), nullable=False, index=True)
     role = Column(String(20), nullable=False)  # user / assistant / system
     content = Column(Text, nullable=True, default="")
-    # 媒体相关字段（当 AI 调用生图/生视频工具时使用）
-    media_type = Column(String(20), nullable=True)  # image / video / None
-    media_url = Column(Text, nullable=True)  # 媒体资源 URL
-    media_task_id = Column(String(200), nullable=True)  # 生成任务 ID
-    media_status = Column(String(20), nullable=True)  # pending / processing / success / failed
+    # 媒体项列表（支持多图/多视频）
+    media_items = Column(JSON, nullable=True, default=list)
     # 工具调用信息
     tool_calls = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -95,10 +96,7 @@ class ChatMessage(Base):
             "session_id": self.session_id,
             "role": self.role,
             "content": self.content or "",
-            "media_type": self.media_type,
-            "media_url": self.media_url,
-            "media_task_id": self.media_task_id,
-            "media_status": self.media_status,
+            "media_items": self.media_items or [],
             "tool_calls": self.tool_calls,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

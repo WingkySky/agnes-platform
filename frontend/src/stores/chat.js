@@ -6,7 +6,9 @@
  *   - 管理消息列表（含流式增量更新）
  *   - 处理 SSE 流式响应事件
  *   - 管理媒体生成任务状态（轮询更新）
- *   - 自动滚动到底部
+ *   - 媒体轮询完成后回写数据库（mediaCallback）
+ *   - 与 taskQueue store 集成（聊天生成的媒体注册到队列）
+ *   - localStorage 持久化（页面切换后恢复状态）
  * ===================================================== */
 
 import { defineStore } from 'pinia'
@@ -18,10 +20,16 @@ import {
   getChatMessages,
   sendMessageStream,
   getMediaStatus,
+  mediaCallback,
 } from '@/api/chat'
+import { useTaskQueueStore } from '@/stores/taskQueue'
 
 // 媒体轮询间隔
 const MEDIA_POLL_INTERVAL = 3000
+// 轮询最大连续失败次数（超过后停止轮询）
+const MAX_POLL_FAIL_COUNT = 5
+// localStorage 持久化 key
+const STORAGE_KEY = 'agnes_chat_state_v1'
 
 export const useChatStore = defineStore('chat', {
   state: () => ({
@@ -44,6 +52,8 @@ export const useChatStore = defineStore('chat', {
     mediaPollTimers: {},
     // 媒体状态缓存（taskId -> status info）
     mediaStatusMap: {},
+    // 媒体轮询连续失败计数（taskId -> count）
+    mediaPollFailCounts: {},
     // AbortController（用于取消流式请求）
     _abortController: null,
   }),
@@ -82,6 +92,7 @@ export const useChatStore = defineStore('chat', {
         this.sessions.unshift(session)
         this.activeSessionId = session.id
         this.messages = []
+        this._saveToStorage()
         return session
       } catch (e) {
         console.error('[Chat] 创建会话失败:', e)
@@ -99,8 +110,9 @@ export const useChatStore = defineStore('chat', {
       this.streamingContent = ''
       this.streamingToolCalls = []
 
-      // 加载消息
+      // 加载消息（从数据库恢复，包含 media_items）
       await this.loadMessages(sessionId)
+      this._saveToStorage()
     },
 
     /** 删除会话 */
@@ -116,13 +128,14 @@ export const useChatStore = defineStore('chat', {
           this.streamingContent = ''
           this.streamingToolCalls = []
         }
+        this._saveToStorage()
       } catch (e) {
         console.error('[Chat] 删除会话失败:', e)
         throw e
       }
     },
 
-    /** 加载会话消息 */
+    /** 加载会话消息（从数据库恢复，含 media_items） */
     async loadMessages(sessionId) {
       if (!sessionId) return
       this.loadingMessages = true
@@ -132,8 +145,12 @@ export const useChatStore = defineStore('chat', {
 
         // 检查是否有进行中的媒体任务，启动轮询
         for (const msg of this.messages) {
-          if (msg.media_task_id && msg.media_status === 'pending') {
-            this._startMediaPoll(msg.media_task_id)
+          if (msg.media_items && Array.isArray(msg.media_items)) {
+            for (const item of msg.media_items) {
+              if (item.task_id && (item.status === 'pending' || item.status === 'processing')) {
+                this._startMediaPoll(item.task_id, msg.id)
+              }
+            }
           }
         }
       } catch (e) {
@@ -162,10 +179,7 @@ export const useChatStore = defineStore('chat', {
         session_id: this.activeSessionId,
         role: 'user',
         content: content,
-        media_type: null,
-        media_url: null,
-        media_task_id: null,
-        media_status: null,
+        media_items: [],
         created_at: new Date().toISOString(),
       }
       this.messages.push(userMsg)
@@ -184,10 +198,7 @@ export const useChatStore = defineStore('chat', {
         session_id: this.activeSessionId,
         role: 'assistant',
         content: '',
-        media_type: null,
-        media_url: null,
-        media_task_id: null,
-        media_status: null,
+        media_items: [],  // 使用 media_items 数组
         created_at: new Date().toISOString(),
         _streaming: true, // 标记正在流式更新
       }
@@ -215,6 +226,7 @@ export const useChatStore = defineStore('chat', {
       } finally {
         this.sending = false
         this._abortController = null
+        this._saveToStorage()
       }
     },
 
@@ -247,44 +259,62 @@ export const useChatStore = defineStore('chat', {
           this._updateStreamingMessage()
           break
 
-        case 'tool_result':
-          // 工具执行结果
+        case 'tool_result': {
+          // 工具执行结果 — 添加到 media_items 数组
           const tc = this.streamingToolCalls.find(t => t.tool === event.tool)
           if (tc) {
             tc.status = 'done'
             tc.result = event.result
           }
-          // 如果有媒体任务，更新 AI 消息的媒体信息
+
           const lastMsg = this.messages[this.messages.length - 1]
           if (lastMsg && lastMsg.role === 'assistant' && event.result) {
-            lastMsg.media_type = event.result.media_type
-            lastMsg.media_task_id = event.result.task_id || event.result.video_id
-            lastMsg.media_status = event.result.status
-            // 启动媒体轮询
-            if (lastMsg.media_task_id && event.result.status === 'pending') {
-              this._startMediaPoll(lastMsg.media_task_id)
+            const result = event.result
+            // 只添加有效的媒体项（有 media_type 且非 error）
+            if (result.media_type && result.status !== 'error') {
+              const mediaItem = {
+                type: result.media_type,
+                url: result.url || '',
+                task_id: result.task_id || result.video_id || '',
+                status: result.status || 'pending',
+              }
+              // 确保 media_items 是数组
+              if (!lastMsg.media_items) {
+                lastMsg.media_items = []
+              }
+              lastMsg.media_items.push(mediaItem)
+
+              // 启动媒体轮询
+              if (mediaItem.task_id && mediaItem.status === 'pending') {
+                this._startMediaPoll(mediaItem.task_id, lastMsg.id)
+              }
+
+              // 注册到任务队列（让全局队列也能看到聊天生成的媒体）
+              this._registerToTaskQueue(mediaItem, result)
             }
           }
           this._updateStreamingMessage()
           break
+        }
 
-        case 'assistant_message':
+        case 'assistant_message': {
           // AI 消息已保存到数据库（更新 ID 和完整信息）
           if (event.message) {
             const lastMsg = this.messages[this.messages.length - 1]
             if (lastMsg && lastMsg.role === 'assistant') {
               lastMsg.id = event.message.id
               lastMsg.content = event.message.content || this.streamingContent
-              lastMsg.media_type = event.message.media_type
-              lastMsg.media_url = event.message.media_url
-              lastMsg.media_task_id = event.message.media_task_id
-              lastMsg.media_status = event.message.media_status
+              // 从数据库恢复 media_items（确保与后端一致）
+              if (event.message.media_items) {
+                lastMsg.media_items = event.message.media_items
+              }
               lastMsg._streaming = false
             }
           }
           break
+        }
 
-        case 'error':
+        case 'error': {
           // 错误事件
           const errMsg = this.messages[this.messages.length - 1]
           if (errMsg && errMsg.role === 'assistant') {
@@ -292,8 +322,9 @@ export const useChatStore = defineStore('chat', {
             errMsg._streaming = false
           }
           break
+        }
 
-        case 'done':
+        case 'done': {
           // 流结束
           const doneMsg = this.messages[this.messages.length - 1]
           if (doneMsg && doneMsg.role === 'assistant') {
@@ -303,6 +334,7 @@ export const useChatStore = defineStore('chat', {
             }
           }
           break
+        }
       }
     },
 
@@ -329,39 +361,91 @@ export const useChatStore = defineStore('chat', {
     },
 
     // =====================================================
-    // 【媒体轮询】
+    // 【媒体轮询】— 轮询完成后回写数据库
     // =====================================================
 
     /** 启动媒体生成状态轮询 */
-    _startMediaPoll(taskId) {
+    _startMediaPoll(taskId, messageId) {
       if (this.mediaPollTimers[taskId]) return
+
+      // 重置失败计数
+      this.mediaPollFailCounts[taskId] = 0
 
       const poll = async () => {
         try {
           const data = await getMediaStatus(taskId)
+          // 轮询成功，重置失败计数
+          this.mediaPollFailCounts[taskId] = 0
           this.mediaStatusMap[taskId] = data
 
-          // 更新消息中的媒体信息
-          const msg = this.messages.find(m => m.media_task_id === taskId)
-          if (msg) {
-            const rawStatus = String(data.status || '').toLowerCase()
-            const isSuccess = ['success', 'completed', 'done'].includes(rawStatus)
-            const isFailed = ['failed', 'error'].includes(rawStatus)
+          // 更新消息中的 media_items
+          const msg = this.messages.find(m => {
+            if (!m.media_items) return false
+            return m.media_items.some(item => item.task_id === taskId)
+          })
 
-            if (isSuccess) {
-              msg.media_status = 'success'
-              msg.media_url = data.result_url || data.video_url || data.url || ''
-              this._stopMediaPoll(taskId)
-            } else if (isFailed) {
-              msg.media_status = 'failed'
-              this._stopMediaPoll(taskId)
-            } else {
-              msg.media_status = 'processing'
+          if (msg) {
+            const item = msg.media_items.find(i => i.task_id === taskId)
+            if (item) {
+              const rawStatus = String(data.status || '').toLowerCase()
+              const isSuccess = ['success', 'completed', 'done', 'succeeded', 'finished'].includes(rawStatus)
+              const isFailed = ['failed', 'error', 'timeout'].includes(rawStatus)
+              const isUnknown = rawStatus === 'unknown'
+
+              if (isSuccess) {
+                item.status = 'success'
+                item.url = data.result_url || data.video_url || data.url || data.image_url || ''
+                this._stopMediaPoll(taskId)
+                // 回写数据库，确保刷新后也能看到
+                if (msg.id && item.url) {
+                  this._mediaCallbackToDB(msg.id, taskId, item.url, 'success')
+                }
+                // 同步更新任务队列
+                this._updateTaskQueueItem(taskId, 'success', item.url)
+              } else if (isFailed) {
+                item.status = 'failed'
+                this._stopMediaPoll(taskId)
+                // 回写数据库
+                if (msg.id) {
+                  this._mediaCallbackToDB(msg.id, taskId, '', 'failed')
+                }
+                // 同步更新任务队列
+                this._updateTaskQueueItem(taskId, 'failed', '')
+              } else if (isUnknown) {
+                // 任务已过期或不存在，停止轮询
+                console.warn('[Chat] 任务不存在或已过期，停止轮询: taskId=%s', taskId)
+                this._stopMediaPoll(taskId)
+                if (item.status !== 'success') {
+                  item.status = 'failed'
+                }
+              } else {
+                item.status = 'processing'
+              }
             }
           }
         } catch (e) {
-          // 单次轮询失败不影响
-          console.warn('[Chat] 媒体状态轮询失败:', taskId, e.message)
+          // 累加失败计数
+          this.mediaPollFailCounts[taskId] = (this.mediaPollFailCounts[taskId] || 0) + 1
+          const failCount = this.mediaPollFailCounts[taskId]
+
+          if (failCount >= MAX_POLL_FAIL_COUNT) {
+            console.warn('[Chat] 媒体轮询连续失败 %d 次，停止轮询: taskId=%s', failCount, taskId)
+            this._stopMediaPoll(taskId)
+            // 将消息中的媒体项标记为失败
+            const msg = this.messages.find(m => {
+              if (!m.media_items) return false
+              return m.media_items.some(item => item.task_id === taskId)
+            })
+            if (msg) {
+              const item = msg.media_items.find(i => i.task_id === taskId)
+              if (item && item.status !== 'success') {
+                item.status = 'failed'
+              }
+            }
+          } else {
+            console.warn('[Chat] 媒体状态轮询失败 (%d/%d): taskId=%s, %s',
+              failCount, MAX_POLL_FAIL_COUNT, taskId, e.message)
+          }
         }
       }
 
@@ -383,6 +467,134 @@ export const useChatStore = defineStore('chat', {
     stopAllMediaPolls() {
       for (const taskId of Object.keys(this.mediaPollTimers)) {
         this._stopMediaPoll(taskId)
+      }
+    },
+
+    /** 媒体回调 — 回写数据库 */
+    async _mediaCallbackToDB(messageId, taskId, mediaUrl, status) {
+      try {
+        await mediaCallback({
+          message_id: messageId,
+          task_id: taskId,
+          media_url: mediaUrl,
+          status: status,
+        })
+        console.log('[Chat] 媒体回写成功: msg=%s, task=%s', messageId, taskId)
+      } catch (e) {
+        console.warn('[Chat] 媒体回写失败:', e.message)
+      }
+    },
+
+    // =====================================================
+    // 【任务队列集成】— 聊天生成的媒体注册到全局队列
+    // =====================================================
+
+    /** 将聊天生成的媒体任务注册到 taskQueue store（仅注册显示，不启动 taskQueue 自己的轮询） */
+    _registerToTaskQueue(mediaItem, toolResult) {
+      try {
+        const taskQueue = useTaskQueueStore()
+        const taskId = mediaItem.task_id
+        if (!taskId) return
+
+        // 检查是否已注册（避免重复）
+        if (taskQueue.getTaskById(taskId)) return
+
+        // 创建一个任务记录到队列中（仅用于展示）
+        // 不启动 taskQueue 自己的轮询，因为 taskQueue 用的是 /api/images/tasks/ 和 /api/videos/ 接口
+        // 聊天创建的任务应该通过 chat store 自己的轮询来更新状态
+        const taskType = mediaItem.type === 'video' ? 'video' : 'image'
+        const task = {
+          taskId: taskId,
+          type: taskType,
+          status: 'processing',
+          prompt: toolResult.prompt || '',
+          params: {},
+          resultUrl: mediaItem.url || null,
+          progress: 0,
+          errorMessage: '',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          pollIntervalMs: taskType === 'video' ? 5000 : 3000,
+          rawResponse: null,
+          backendTaskId: taskId,
+          // 标记来源为聊天 — taskQueue 恢复时跳过此类任务的轮询
+          source: 'chat',
+        }
+        taskQueue.tasks[taskId] = task
+        // 注意：不调用 taskQueue._startPolling(taskId)，避免用错误的 API 轮询
+        taskQueue._saveToStorage()
+      } catch (e) {
+        console.warn('[Chat] 注册任务到队列失败:', e.message)
+      }
+    },
+
+    /** 同步更新任务队列中的任务状态 */
+    _updateTaskQueueItem(taskId, status, resultUrl) {
+      try {
+        const taskQueue = useTaskQueueStore()
+        const task = taskQueue.getTaskById(taskId)
+        if (task) {
+          task.status = status
+          if (resultUrl) {
+            task.resultUrl = resultUrl
+          }
+          task.updatedAt = Date.now()
+          if (status === 'success') {
+            task.progress = 100
+          }
+          taskQueue._saveToStorage()
+        }
+      } catch (e) {
+        // 忽略
+      }
+    },
+
+    // =====================================================
+    // 【持久化】— 页面切换后恢复状态
+    // =====================================================
+
+    _saveToStorage() {
+      if (typeof localStorage === 'undefined') return
+      try {
+        const data = {
+          activeSessionId: this.activeSessionId,
+          // 只保存必要的会话信息
+          savedAt: Date.now(),
+        }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+      } catch (_) {
+        // localStorage 写入失败，静默忽略
+      }
+    },
+
+    _restoreFromStorage() {
+      if (typeof localStorage === 'undefined') return
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY)
+        if (!raw) return
+        const data = JSON.parse(raw)
+        if (!data) return
+
+        // 恢复活跃会话 ID（消息从数据库重新加载）
+        if (data.activeSessionId) {
+          this.activeSessionId = data.activeSessionId
+        }
+      } catch (_) {
+        // 解析失败不影响启动
+      }
+    },
+
+    /** 初始化 — 应用启动时调用 */
+    async init() {
+      // 从 localStorage 恢复
+      this._restoreFromStorage()
+
+      // 加载会话列表
+      await this.loadSessions()
+
+      // 如果有活跃会话，从数据库加载消息
+      if (this.activeSessionId) {
+        await this.loadMessages(this.activeSessionId)
       }
     },
   },

@@ -115,9 +115,9 @@ export const useTaskQueueStore = defineStore('taskQueue', {
         })
       }
 
-      // 3. 启动所有未完成任务的轮询
+      // 3. 启动所有未完成任务的轮询（跳过聊天来源的任务，由 chat store 自己管理）
       for (const task of Object.values(this.tasks)) {
-        if (!isFinalStatus(task.status)) {
+        if (!isFinalStatus(task.status) && task.source !== 'chat') {
           this._startPolling(task.taskId)
         }
       }
@@ -492,6 +492,7 @@ export const useTaskQueueStore = defineStore('taskQueue', {
           updatedAt: t.updatedAt,
           pollIntervalMs: t.pollIntervalMs,
           backendTaskId: t.backendTaskId,
+          source: t.source || null,
         }))
         const data = {
           tasks: tasksToSave,
