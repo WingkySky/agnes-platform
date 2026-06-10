@@ -398,6 +398,50 @@ export const useTaskQueueStore = defineStore('taskQueue', {
     },
 
     // =====================================================
+    // 【聊天任务集成】— 供 chat store 调用，注册/更新聊天生成的媒体任务
+    // =====================================================
+
+    /** 注册聊天生成的媒体任务到队列（仅展示，不启动 taskQueue 自己的轮询） */
+    registerChatTask({ taskId, type, prompt, resultUrl, backendTaskId }) {
+      if (!taskId) return
+      // 避免重复注册
+      if (this.tasks[taskId]) return
+
+      const taskType = type === 'video' ? 'video' : 'image'
+      this.tasks[taskId] = {
+        taskId,
+        type: taskType,
+        status: 'processing',
+        prompt: prompt || '',
+        params: {},
+        resultUrl: resultUrl || null,
+        posterUrl: null,
+        progress: 0,
+        errorMessage: '',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        pollIntervalMs: taskType === 'video' ? VIDEO_POLL_INTERVAL : IMAGE_POLL_INTERVAL,
+        rawResponse: null,
+        backendTaskId: backendTaskId || taskId,
+        // 标记来源为聊天 — taskQueue 恢复时跳过此类任务的轮询
+        source: 'chat',
+      }
+      this._saveToStorage()
+    },
+
+    /** 更新聊天任务的状态（由 chat store 的媒体轮询回调） */
+    updateChatTask(taskId, { status, resultUrl, progress }) {
+      const task = this.tasks[taskId]
+      if (!task) return
+      if (status) task.status = status
+      if (resultUrl) task.resultUrl = resultUrl
+      if (typeof progress === 'number') task.progress = progress
+      task.updatedAt = Date.now()
+      if (status === 'success') task.progress = 100
+      this._saveToStorage()
+    },
+
+    // =====================================================
     // 【面板/选中】
     // =====================================================
     setActiveTask(taskId) {

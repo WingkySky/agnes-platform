@@ -632,33 +632,14 @@ export const useChatStore = defineStore('chat', {
         const taskId = mediaItem.task_id
         if (!taskId) return
 
-        // 检查是否已注册（避免重复）
-        if (taskQueue.getTaskById(taskId)) return
-
-        // 创建一个任务记录到队列中（仅用于展示）
-        // 不启动 taskQueue 自己的轮询，因为 taskQueue 用的是 /api/images/tasks/ 和 /api/videos/ 接口
-        // 聊天创建的任务应该通过 chat store 自己的轮询来更新状态
-        const taskType = mediaItem.type === 'video' ? 'video' : 'image'
-        const task = {
-          taskId: taskId,
-          type: taskType,
-          status: 'processing',
+        // 通过 taskQueue 的 action 注册，确保 Pinia 响应式更新正确触发
+        taskQueue.registerChatTask({
+          taskId,
+          type: mediaItem.type,
           prompt: toolResult.prompt || '',
-          params: {},
           resultUrl: mediaItem.url || null,
-          progress: 0,
-          errorMessage: '',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          pollIntervalMs: taskType === 'video' ? 5000 : 3000,
-          rawResponse: null,
           backendTaskId: taskId,
-          // 标记来源为聊天 — taskQueue 恢复时跳过此类任务的轮询
-          source: 'chat',
-        }
-        taskQueue.tasks[taskId] = task
-        // 注意：不调用 taskQueue._startPolling(taskId)，避免用错误的 API 轮询
-        taskQueue._saveToStorage()
+        })
       } catch (e) {
         console.warn('[Chat] 注册任务到队列失败:', e.message)
       }
@@ -668,18 +649,8 @@ export const useChatStore = defineStore('chat', {
     _updateTaskQueueItem(taskId, status, resultUrl) {
       try {
         const taskQueue = useTaskQueueStore()
-        const task = taskQueue.getTaskById(taskId)
-        if (task) {
-          task.status = status
-          if (resultUrl) {
-            task.resultUrl = resultUrl
-          }
-          task.updatedAt = Date.now()
-          if (status === 'success') {
-            task.progress = 100
-          }
-          taskQueue._saveToStorage()
-        }
+        // 通过 taskQueue 的 action 更新，确保 Pinia 响应式更新正确触发
+        taskQueue.updateChatTask(taskId, { status, resultUrl })
       } catch (e) {
         // 忽略
       }
