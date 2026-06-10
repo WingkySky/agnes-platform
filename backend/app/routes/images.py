@@ -60,8 +60,14 @@ async def create_image_task_async(req: ImageGenerationRequest):
         "model": req.model,
         "size": size,
         "response_format": req.response_format,
-        "mode": "image2image" if req.base64_image else "text2image",
+        "mode": "image2image" if (req.base64_image or req.image_url) else "text2image",
     }
+
+    # 图生图：将参考图传入 params，供 image_poller 后台生成使用
+    if req.base64_image:
+        params["base64_image"] = req.base64_image
+    if req.image_url:
+        params["image_url"] = req.image_url
 
     task = await image_poller_manager.create_task(
         prompt=req.prompt,
@@ -161,6 +167,8 @@ async def create_image_generation(req: ImageGenerationRequest, db: AsyncSession 
             size=req.size,
             response_format=req.response_format,
             base64_image=req.base64_image,
+            image_url=req.image_url,
+            quality="standard",
         )
     except Exception as e:
         logger.error("[图片生成] Agnes AI 调用失败: %s", e)
@@ -193,7 +201,7 @@ async def create_image_generation(req: ImageGenerationRequest, db: AsyncSession 
         params = {
             "size": req.size,
             "response_format": req.response_format,
-            "mode": "image2image" if req.base64_image else "text2image",
+            "mode": "image2image" if (req.base64_image or req.image_url) else "text2image",
         }
         record = Generation(
             type="image",

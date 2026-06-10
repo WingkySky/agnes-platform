@@ -355,8 +355,15 @@ async function handleGenerate() {
     size: size.value,
     mode: mode.value,
   }
+                  // 图生图：区分上传图片（base64）和链接图片（URL）
   if (mode.value === 'image2image' && referenceFile.value) {
-    params.base64_image = referenceFile.value.base64
+    if (referenceFile.value.source === 'url' && referenceFile.value.url) {
+      // URL 模式：直接传公网链接
+      params.image_url = referenceFile.value.url
+    } else if (referenceFile.value.base64) {
+      // 文件上传模式：传 base64
+      params.base64_image = referenceFile.value.base64
+    }
   }
 
   try {

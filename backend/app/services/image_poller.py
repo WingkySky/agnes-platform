@@ -154,6 +154,8 @@ class ImagePollerManager:
                 size=task.params.get("size", "1024x1024"),
                 response_format=task.params.get("response_format", "url"),
                 base64_image=task.params.get("base64_image"),
+                image_url=task.params.get("image_url"),
+                quality=task.params.get("quality", "standard"),
             )
 
             # 解析结果
@@ -230,7 +232,7 @@ class ImagePollerManager:
                     model=task.params.get("model", "agnes-image-2.1-flash"),
                     params={
                         k: v for k, v in task.params.items()
-                        if k != "base64_image"  # 不保存大的 base64 参数
+                        if k not in ("base64_image", "image_url")  # 不保存大的 base64 和 URL 参数
                     },
                     result_url=task.result_url or "(base64)",
                     status=task.status,

@@ -425,6 +425,25 @@ async def send_message(
                 att_count = len(msg.attachments)
                 att_note = f"\n[用户在本轮上传了 {att_count} 张参考图片]"
                 content = (content + att_note) if content else att_note.strip()
+            # 如果 assistant 消息包含已生成的媒体项，注入上下文信息
+            # 让 AI 知道之前生成了什么图片/视频，以便后续对话中正确引用
+            if msg.role == "assistant" and msg.media_items and len(msg.media_items) > 0:
+                media_notes = []
+                for idx, mi in enumerate(msg.media_items):
+                    mi_type = mi.get("type", "unknown")
+                    mi_status = mi.get("status", "unknown")
+                    mi_url = mi.get("url", "")
+                    if mi_status in ("success", "completed", "done"):
+                        media_notes.append(
+                            f"  [{idx+1}] 类型: {mi_type}, 状态: 已完成, URL: {mi_url}"
+                        )
+                    elif mi_status in ("pending", "processing"):
+                        media_notes.append(
+                            f"  [{idx+1}] 类型: {mi_type}, 状态: 生成中"
+                        )
+                if media_notes:
+                    media_context = "\n[本轮生成的媒体内容]\n" + "\n".join(media_notes)
+                    content = (content + media_context) if content else media_context.strip()
             chat_history.append({"role": msg.role, "content": content})
 
     # SSE 流式生成器

@@ -22,6 +22,11 @@ class ImageGenerationRequest(BaseModel):
         default=None,
         description="图生图时的参考图片（base64 格式，不含前缀）",
     )
+    # 图片 URL（与 base64_image 二选一，URL 模式下直接传公网链接）
+    image_url: Optional[str] = Field(
+        default=None,
+        description="图生图时的参考图片 URL（公网可访问链接，与 base64_image 二选一）",
+    )
 
     @field_validator("prompt")
     @classmethod

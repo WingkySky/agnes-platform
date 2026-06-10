@@ -135,11 +135,20 @@ class AgnesAIClient:
         size: str = "1024x1024",
         response_format: str = "url",
         base64_image: Optional[str] = None,
+        image_url: Optional[str] = None,
+        quality: str = "standard",
     ) -> Dict[str, Any]:
         """
         调用 Agnes AI 生成图片（异步等待，不阻塞其他请求的事件循环）。
-        - 文生图：不提供 base64_image
-        - 图生图：提供 base64_image（参考图）
+        - 文生图：不提供 base64_image 和 image_url
+        - 图生图（上传图片）：提供 base64_image（参考图的 base64 数据）
+        - 图生图（链接图片）：提供 image_url（公网可访问的图片 URL）
+
+        图生图 API 规范（Agnes Image 2.1 Flash 官方文档）：
+          - image 字段放在 extra_body.image 中，值是一个数组（如 ["data:image/...;base64,..."]）
+          - image 值为 data URI 字符串（data:image/xxx;base64,...）或公网 URL
+          - response_format 在图生图模式下也放在 extra_body 中
+          - quality、n、size 等参数放在请求体顶层
         """
         url = f"{self.base_url}/images/generations"
 
@@ -147,20 +156,41 @@ class AgnesAIClient:
             "model": model,
             "prompt": prompt,
             "size": size,
+            "quality": quality,
+            "n": 1,
         }
 
-        if base64_image:
-            cleaned_image = base64_image
-            if ";base64," in cleaned_image:
-                cleaned_image = cleaned_image.split(";base64,", 1)[1]
-            # 图生图：直接在 body 中添加 image 参数
-            body["image"] = [cleaned_image]
+        # 图生图：确定参考图来源（base64_image 和 image_url 二选一）
+        # 优先使用 base64_image（本地上传），其次使用 image_url（链接图片）
+        ref_image = base64_image or image_url
+
+        if ref_image:
+            # 图生图：处理图片数据，放入 extra_body.image 数组
+            # Agnes API 要求 image 为 data URI（带 data:image/...;base64, 前缀）或公网 URL
+            if ref_image.startswith("data:"):
+                # 已经是完整的 Data URI，直接使用
+                data_uri = ref_image
+            elif ref_image.startswith("http://") or ref_image.startswith("https://"):
+                # 公网 URL，直接传入
+                data_uri = ref_image
+            else:
+                # 纯 base64，需要补上 Data URI 前缀
+                data_uri = f"data:image/png;base64,{ref_image}"
+
+            # extra_body.image 必须是数组格式
+            extra = {"image": [data_uri]}
+
+            # 图生图的 response_format 也放在 extra_body 中
             if response_format == "b64_json":
-                body["return_base64"] = True
+                extra["response_format"] = "b64_json"
+
+            body["extra_body"] = extra
         elif response_format == "b64_json":
+            # 文生图的 b64_json 输出使用 return_base64
             body["return_base64"] = True
 
-        logger.info(f"[图片生成] 调用 Agnes AI: prompt={prompt[:60]}...  size={size}")
+        img_source = "base64" if base64_image else ("url" if image_url else "none")
+        logger.info(f"[图片生成] 调用 Agnes AI: prompt={prompt[:60]}...  size={size}  mode={'image2image' if ref_image else 'text2image'}  source={img_source}")
         return await self._post(url, body)
 
     # ---------- 视频任务创建 ----------
@@ -204,7 +234,8 @@ class AgnesAIClient:
 
         # 关键帧动画模式：多张图片和 mode 必须放在 extra_body 中
         # Agnes AI API 要求关键帧的 image 数组和 mode 放在 extra_body 嵌套对象内，
-        # 放在顶层会导致 400 错误（与图生图 extra_body.image 规则一致）
+        # 放在顶层会导致 400 错误
+        # 注：图生图的 image 同样放在 extra_body.image 数组中（见 create_image 方法）
         if mode == "keyframes" and images and len(images) > 0:
             # 过滤空值/None，确保仅保留有效图片
             valid_images = [img for img in images if img and isinstance(img, str) and img.strip()]
