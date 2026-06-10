@@ -68,8 +68,21 @@
       </div>
     </aside>
 
-    <!-- 右侧：聊天区 -->
-    <main class="chat-main">
+    <!-- 右侧：聊天区（拖拽覆盖整个区域） -->
+    <main
+      class="chat-main"
+      @dragover.prevent="onDragOver"
+      @dragenter.prevent="onDragEnter"
+      @dragleave.prevent="onDragLeave"
+      @drop.prevent="onDrop"
+    >
+      <!-- 拖拽覆盖提示（覆盖整个聊天区域，包括输入栏） -->
+      <div v-if="isDragging" class="drag-overlay">
+        <div class="drag-overlay-content">
+          <el-icon :size="56"><Picture /></el-icon>
+          <p>释放以添加图片</p>
+        </div>
+      </div>
       <!-- 重命名会话对话框 -->
       <el-dialog
         v-model="renameDialogVisible"
@@ -109,23 +122,13 @@
         </div>
       </div>
 
-      <!-- 聊天消息区 -->
+      <!-- 聊天区域（拖拽覆盖整个区域，包括输入栏） -->
       <template v-else>
-        <!-- 消息列表（支持拖拽文件上传） -->
+        <!-- 消息列表 -->
         <div
           class="chat-messages"
           ref="messagesRef"
-          @dragover.prevent="onDragOver"
-          @dragleave.prevent="onDragLeave"
-          @drop.prevent="onDrop"
         >
-          <!-- 拖拽覆盖提示 -->
-          <div v-if="isDragging" class="drag-overlay">
-            <div class="drag-overlay-content">
-              <el-icon :size="48"><Picture /></el-icon>
-              <p>释放以添加图片</p>
-            </div>
-          </div>
           <div
             v-for="msg in chatStore.messages"
             :key="msg.id"
@@ -552,20 +555,35 @@ function removePendingAttachment(idx) {
 // =====================================================
 // 拖拽文件上传
 // =====================================================
-/** 拖拽进入/经过 */
+// 拖拽计数器：解决 dragleave 子元素冒泡导致覆盖层闪烁的问题
+let dragCounter = 0
+
+/** 拖拽进入 */
 function onDragOver(e) {
+  if (!isDragging.value) {
+    isDragging.value = true
+  }
+}
+
+/** 拖拽进入时计数+1 */
+function onDragEnter(e) {
+  dragCounter++
   isDragging.value = true
 }
 
-/** 拖拽离开 */
+/** 拖拽离开时计数-1，归零才关闭覆盖层 */
 function onDragLeave(e) {
-  // 只有离开消息区域时才取消拖拽状态
-  isDragging.value = false
+  dragCounter--
+  if (dragCounter <= 0) {
+    dragCounter = 0
+    isDragging.value = false
+  }
 }
 
 /** 拖拽释放：处理文件 */
 async function onDrop(e) {
   isDragging.value = false
+  dragCounter = 0
   const files = Array.from(e.dataTransfer?.files || [])
   if (files.length === 0) return
 
@@ -826,6 +844,40 @@ function getImageIndex(mediaItems, currentIdx) {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  position: relative;
+}
+
+/* 拖拽覆盖层（覆盖整个聊天区域，类似豆包风格） */
+.drag-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 20, 40, 0.88);
+  border: 2px dashed rgba(100, 180, 255, 0.6);
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
+
+.drag-overlay-content {
+  text-align: center;
+  color: #a0d4ff;
+  animation: dragPulse 1.5s ease-in-out infinite;
+}
+
+.drag-overlay-content p {
+  margin: 16px 0 0;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 1px;
+}
+
+@keyframes dragPulse {
+  0%, 100% { opacity: 0.8; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
 }
 
 /* ---- 欢迎页 ---- */
@@ -900,32 +952,6 @@ function getImageIndex(mediaItems, currentIdx) {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  position: relative;
-}
-
-/* 拖拽覆盖层 */
-.drag-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(10, 20, 40, 0.85);
-  border: 2px dashed rgba(100, 180, 255, 0.5);
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10;
-  pointer-events: none;
-}
-
-.drag-overlay-content {
-  text-align: center;
-  color: #a0d4ff;
-}
-
-.drag-overlay-content p {
-  margin: 12px 0 0;
-  font-size: 16px;
-  font-weight: 500;
 }
 
 .message-item {
