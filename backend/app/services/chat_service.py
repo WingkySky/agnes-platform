@@ -256,33 +256,68 @@ class ChatService:
             session_id: 会话 ID（用于关联生成任务）
             attachments: 可选的用户参考图列表（用于 System Prompt 上下文注入与工具执行）
         """
-        # ── 根据附件数量动态追加 System Prompt 上下文 ──
-        # 仅告知模型存在参考图，不主动引导使用 image2image
-        # 模型应根据用户意图自行决定是否使用参考图
+        # ── 根据附件类型和数量动态追加 System Prompt 上下文 ──
+        # 区分三种类型的附件，对 AI 说明其能力边界：
+        #   - image (base64 / image_url): AI 可以"看图"，走多模态注入
+        #   - video (video_url): AI 当前无法"看视频"，仅文字告知有视频链接
+        #   - document (doc_url): AI 当前无法"读文档"，仅文字告知有文档链接
         attachment_note = ""
-        att_count = len(attachments) if attachments else 0
-        if att_count == 1:
-            # 判断附件来源类型（base64 上传 or URL 链接）
-            att_source = "上传" if (attachments[0].get("base64_image", "").startswith("data:image/")) else "链接"
-            attachment_note = (
-                f"\n\n【参考图上下文】用户【本轮】提供了 1 张图片（{att_source}）。\n"
-                f"重要提示：\n"
-                f"- 提供图片 ≠ 用户要生成图片，请根据用户文字意图判断\n"
-                f"- 只有用户明确说'生成'、'画'、'创建'时才调用 generate_image\n"
-                f"- 如果用户只是描述/分析/讨论图片，直接文字回复，不要调用工具\n"
-                f"- 如果用户要求基于此图生成新图，将 mode 设为 'image2image'\n"
-                f"- 如果用户明确说'忽略这张图'或'只按文字生成'，则设 use_reference_image=false 或 mode='text2image'"
-            )
-        elif att_count >= 2:
-            attachment_note = (
-                f"\n\n【参考图上下文】用户【本轮】提供了 {att_count} 张图片。\n"
-                f"重要提示：\n"
-                f"- 提供图片 ≠ 用户要生成图片，请根据用户文字意图判断\n"
-                f"- 只有用户明确说'生成'、'画'、'创建'时才调用工具\n"
-                f"- 如果用户只是描述/分析/讨论图片，直接文字回复，不要调用工具\n"
-                f"- 如果用户要求基于参考图生成新图：单张参考图用 image2image，多张参考图用 keyframes\n"
-            )
-        # att_count == 0: 不注入
+        if attachments:
+            image_atts = [a for a in attachments
+                          if (a.get("base64_image") and a["base64_image"].startswith("data:image/"))
+                          or a.get("image_url")]
+            video_atts = [a for a in attachments if a.get("video_url")]
+            doc_atts = [a for a in attachments if a.get("doc_url")]
+
+            image_count = len(image_atts)
+            video_count = len(video_atts)
+            doc_count = len(doc_atts)
+
+            note_segments = []
+            # 图片上下文
+            if image_count > 0:
+                # 判断来源（上传 vs 链接）
+                has_base64 = any(a.get("base64_image") and a["base64_image"].startswith("data:image/") for a in image_atts)
+                has_url = any(a.get("image_url") for a in image_atts)
+                if has_base64 and has_url:
+                    source_label = "上传+链接"
+                elif has_url:
+                    source_label = "链接"
+                else:
+                    source_label = "上传"
+                note_segments.append(
+                    f"【参考图上下文】用户【本轮】提供了 {image_count} 张图片（{source_label}）。\n"
+                    f"重要提示：\n"
+                    f"- 提供图片 ≠ 用户要生成图片，请根据用户文字意图判断\n"
+                    f"- 只有用户明确说'生成'、'画'、'创建'时才调用 generate_image\n"
+                    f"- 如果用户只是描述/分析/讨论图片，直接文字回复，不要调用工具\n"
+                    f"- 如果用户要求基于此图生成新图，将 mode 设为 'image2image'\n"
+                    f"- 如果用户明确说'忽略这张图'或'只按文字生成'，则设 use_reference_image=false 或 mode='text2image'"
+                )
+
+            # 视频上下文（仅文字提示，AI 不能看视频）
+            if video_count > 0:
+                note_segments.append(
+                    f"【参考视频上下文】用户【本轮】提供了 {video_count} 个视频链接。\n"
+                    f"重要提示：\n"
+                    f"- AI 当前无法观看视频内容，视频链接仅供你知道用户在谈论某个视频\n"
+                    f"- 不要假装描述视频内容，以用户的文字描述为准\n"
+                    f"- 如果用户要求基于视频风格生成新内容，使用用户文字描述来完成\n"
+                )
+
+            # 文档上下文（仅文字提示，AI 不能读文档）
+            if doc_count > 0:
+                note_segments.append(
+                    f"【参考文档上下文】用户【本轮】提供了 {doc_count} 个文档链接。\n"
+                    f"重要提示：\n"
+                    f"- AI 当前无法读取文档（PDF / DOC / TXT 等）内容\n"
+                    f"- 不要假装描述文档内容，以用户的文字描述为准\n"
+                    f"- 如果用户讨论文档主题，按用户文字进行回复即可\n"
+                )
+
+            if note_segments:
+                attachment_note = "\n\n" + "\n\n".join(note_segments)
+        # 无附件：不注入
 
         system_prompt = SYSTEM_PROMPT + attachment_note
         request_messages = [{"role": "system", "content": system_prompt}] + messages
@@ -291,6 +326,7 @@ class ChatService:
         # 让 AI 模型真正"看到"图片内容，而不是仅靠 system prompt 文字描述猜测
         # 这样 AI 能根据图片实际内容生成准确的提示词，避免复用历史提示词
         # 支持 base64 data URI 和 URL 链接两种格式
+        # 【重要】视频和文档链接不注入多模态，仅靠 system prompt 文字告知
         if attachments:
             for i in range(len(request_messages) - 1, -1, -1):
                 if request_messages[i]["role"] == "user":
@@ -317,6 +353,8 @@ class ChatService:
                                 "type": "image_url",
                                 "image_url": {"url": att["image_url"]}
                             })
+                        # 其他类型（video_url / doc_url）：不注入多模态，
+                        # 已在 system prompt 中告知 AI 其存在
                     if multi_content:
                         request_messages[i] = {
                             "role": "user",
@@ -379,10 +417,19 @@ class ChatService:
                 if isinstance(func_args, str):
                     func_args = json.loads(func_args)
 
-                # 合并附件：优先使用本轮用户上传的附件，其次补充历史图片
-                effective_attachments = list(attachments) if attachments else []
+                # 合并附件：优先使用本轮用户上传的附件（只取图片类型，视频/文档不参与图生图），其次补充历史图片
+                # 过滤：只有 base64_image 或 image_url 的附件才能作为生成工具的参考图
+                raw_atts = list(attachments) if attachments else []
+                effective_attachments = [
+                    a for a in raw_atts
+                    if (a.get("base64_image") and a["base64_image"].startswith("data:image/"))
+                    or a.get("image_url")
+                ]
+                if not effective_attachments and raw_atts:
+                    logger.info("[Chat] 本轮附件中过滤出 %d 张可用图片（总数 %d），其余为视频/文档链接，不参与图生图参考",
+                                len(effective_attachments), len(raw_atts))
                 if not effective_attachments and history_images:
-                    # 本轮无附件但有历史图片：根据工具类型和 mode 参数决定是否自动引用
+                    # 本轮无图片附件但有历史图片：根据工具类型和 mode 参数决定是否自动引用
                     llm_mode = func_args.get("mode")
                     if func_name == "generate_video":
                         # 视频生成：如果 AI 没指定 text2video，且有历史图片，自动引用最近的图片

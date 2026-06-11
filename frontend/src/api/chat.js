@@ -93,17 +93,48 @@ export async function sendMessageStream(sessionId, content, attachments, onEvent
   const baseURL = import.meta.env.VITE_API_BASE_URL || ''
   const url = `${baseURL}/api/chat/sessions/${sessionId}/messages`
 
-  // 构造请求体（带附件字段，支持 base64 上传和 URL 链接两种格式）
+  // =====================================================
+  // 构造请求体（支持 base64 上传 / image_url / video_url / doc_url 四种格式）
+  // 新增：自动从文本识别的 URL 会携带 _link_type 标注
+  //   _link_type=image     → image_url（AI 可看图）
+  //   _link_type=video     → video_url（作为参考记录，AI 当前不看视频）
+  //   _link_type=document  → doc_url（作为参考记录，AI 当前不读文档）
+  //   _link_type=webpage   → 不进入 attachments，仅保留在文本中
+  // =====================================================
   const body = { content }
   if (attachments && attachments.length > 0) {
     body.attachments = attachments.map((a) => {
-      if (a.source === 'url' && a.url) {
-        // URL 链接图片：传 image_url 字段
+      // 视频链接
+      if (a._link_type === 'video' && a.url) {
+        return {
+          name: a.name || 'video',
+          video_url: a.url,
+          size: 0,
+          mime_type: 'video/url',
+          source: 'url',
+          _link_type: 'video',
+        }
+      }
+      // 文档链接
+      if (a._link_type === 'document' && a.url) {
+        return {
+          name: a.name || 'document',
+          doc_url: a.url,
+          size: 0,
+          mime_type: 'application/url',
+          source: 'url',
+          _link_type: 'document',
+        }
+      }
+      // 图片 URL 链接（手动添加或自动识别的 image 类型）
+      if ((a.source === 'url' || a._link_type === 'image') && a.url) {
         return {
           name: a.name || 'url_image',
           image_url: a.url,
           size: 0,
           mime_type: 'image/url',
+          source: 'url',
+          _link_type: 'image',
         }
       }
       // base64 上传图片：传 base64_image 字段

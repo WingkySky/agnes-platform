@@ -174,24 +174,53 @@
                 <el-icon :size="18"><User /></el-icon>
               </div>
               <div class="message-content">
-                <!-- 用户上传的参考图附件 -->
+                <!-- =====================================================
+                     用户上传的参考图 / 参考视频 / 参考文档 / 参考链接
+                     自动根据附件类型展示不同的卡片
+                     - image    → 缩略图（可点击预览）
+                     - video    → 可播放的视频块
+                     - document → 文档图标卡片（可点击打开原链接）
+                     - 其他 URL → 链接卡片
+                     base64 → 默认视为图片缩略图
+                     ===================================================== -->
                 <div v-if="msg.attachments && msg.attachments.length > 0" class="attachments-preview">
-                  <el-image
-                    v-for="(att, idx) in msg.attachments"
-                    :key="'att-' + idx"
-                    :src="att.url || att.base64 || att.base64_image"
-                    :preview-src-list="getAttachmentPreviewList(msg.attachments)"
-                    :initial-index="idx"
-                    fit="cover"
-                    class="attachment-thumb"
-                    :preview-teleported="true"
-                  >
-                    <template #error>
-                      <div class="attachment-thumb-fallback">
-                        <el-icon><WarningFilled /></el-icon>
-                      </div>
-                    </template>
-                  </el-image>
+                  <template v-for="(att, idx) in msg.attachments" :key="'att-' + idx">
+                    <!-- 视频链接附件 -->
+                    <video
+                      v-if="getAttachmentType(att) === 'video'"
+                      :src="getAttachmentUrl(att)"
+                      controls
+                      class="attachment-video"
+                      preload="metadata"
+                    />
+                    <!-- 文档链接附件 -->
+                    <a
+                      v-else-if="getAttachmentType(att) === 'document'"
+                      :href="getAttachmentUrl(att)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="attachment-doc"
+                    >
+                      <el-icon :size="22"><Document /></el-icon>
+                      <span class="attachment-doc-name">{{ getAttachmentName(att) }}</span>
+                    </a>
+                    <!-- 图片附件（base64 上传 / image_url 链接） -->
+                    <el-image
+                      v-else
+                      :src="getAttachmentUrl(att)"
+                      :preview-src-list="getAttachmentPreviewList(msg.attachments)"
+                      :initial-index="getImageAttachmentIndex(msg.attachments, idx)"
+                      fit="cover"
+                      class="attachment-thumb"
+                      :preview-teleported="true"
+                    >
+                      <template #error>
+                        <div class="attachment-thumb-fallback">
+                          <el-icon><WarningFilled /></el-icon>
+                        </div>
+                      </template>
+                    </el-image>
+                  </template>
                 </div>
                 <p v-if="msg.content">{{ msg.content }}</p>
               </div>
@@ -379,7 +408,7 @@ import { ref, onMounted, onActivated, nextTick, watch, computed } from 'vue'
 import {
   Plus, Delete, User, Monitor, Picture, VideoPlay,
   Loading, Check, WarningFilled, Promotion, ChatDotRound,
-  Edit, MagicStick, Close, Link, MoreFilled,
+  Edit, MagicStick, Close, Link, MoreFilled, Document,
 } from '@element-plus/icons-vue'
 import { useI18n } from '@/i18n'
 import { useChatStore } from '@/stores/chat'
@@ -530,12 +559,27 @@ async function handleAutoSummarize(sessionId) {
   }
 }
 
-/** 发送消息（支持附件） */
+/** 发送消息（支持附件 + 文本中自动识别 URL） */
 async function handleSend() {
   const content = inputText.value.trim()
-  const attachments = pendingAttachments.value
+  // =====================================================
+  // 自动从文本中识别 URL 并作为附件
+  //   识别规则：
+  //   - 图片扩展名 → image_url 附件（传给 AI 多模态）
+  //   - 视频扩展名 → video_url 附件（展示用，AI 不看视频）
+  //   - 文档扩展名 → doc_url 附件（展示用，AI 不读文档）
+  //   - 其他 URL  → 不加入附件，保留在文本中
+  // =====================================================
+  const urlAtts = extractUrlsAsAttachments(content)
+  const attachments = [...pendingAttachments.value, ...urlAtts]
   if (!content && attachments.length === 0) return
   if (chatStore.sending) return
+
+  // 总数限制（防止超出后端 MAX_ATTACHMENTS）
+  if (attachments.length > MAX_ATTACHMENTS) {
+    ElMessage.warning(`最多发送 ${MAX_ATTACHMENTS} 个附件`)
+    return
+  }
 
   inputText.value = ''
   pendingAttachments.value = []
@@ -725,12 +769,6 @@ async function onDrop(e) {
   pendingAttachments.value.push(...results)
 }
 
-/** 获取附件预览列表（用于 el-image 组预览） */
-function getAttachmentPreviewList(attachments) {
-  if (!attachments || attachments.length === 0) return []
-  return attachments.map((a) => a.url || a.base64 || a.base64_image)
-}
-
 /** 快捷提示点击 */
 async function handleQuickTip(tip) {
   if (!chatStore.hasActiveSession) {
@@ -820,6 +858,115 @@ function getImageIndex(mediaItems, currentIdx) {
   const currentItem = mediaItems[currentIdx]
   const idx = imageItems.indexOf(currentItem)
   return idx >= 0 ? idx : 0
+}
+
+// =====================================================
+// 【URL 自动识别】—— 从用户消息文本中提取链接并判断类型
+// 支持类型：image / video / document / webpage
+// 核心思路：用户直接粘贴 URL 时，无需手动点击"上传链接"按钮
+// =====================================================
+
+// 匹配 http(s):// 开头的独立链接（不包含中文标点、空白、括号、引号）
+const URL_REGEX = /\bhttps?:\/\/[^\s，。！？、<>（）()\[\]{}"'`]+/gi
+
+/** 根据文件扩展名快速判断链接类型（无需网络请求，即时响应） */
+function guessUrlTypeByExt(url) {
+  if (!url) return 'unknown'
+  const u = url.toLowerCase().split('?')[0]
+  if (/\.(jpg|jpeg|png|gif|webp|bmp|svg|tiff?|avif)$/.test(u)) return 'image'
+  if (/\.(mp4|webm|mov|m4v|avi|mkv|flv)$/.test(u)) return 'video'
+  if (/\.(pdf|doc|docx|txt|md|csv|xls|xlsx|ppt|pptx|rtf|odt)$/.test(u)) return 'document'
+  return 'unknown'
+}
+
+/** 从 URL 中提取文件名（作为附件名称） */
+function extractUrlName(url) {
+  try {
+    const u = new URL(url)
+    const parts = u.pathname.split('/')
+    return parts[parts.length - 1] || u.hostname
+  } catch {
+    return url.split('/').pop() || 'link'
+  }
+}
+
+/** 从文本中识别 URL，返回附件对象数组（仅包含 image / video / document，webpage 不加入附件） */
+function extractUrlsAsAttachments(text) {
+  if (!text) return []
+  const matches = text.match(URL_REGEX) || []
+  const atts = []
+  const seen = new Set()
+  for (const rawUrl of matches) {
+    // 去重
+    if (seen.has(rawUrl)) continue
+    seen.add(rawUrl)
+    const linkType = guessUrlTypeByExt(rawUrl)
+    if (linkType === 'unknown') {
+      // 未知扩展名 → 不加入附件，仅保留在文本中
+      continue
+    }
+    atts.push({
+      name: extractUrlName(rawUrl),
+      url: rawUrl,
+      size: 0,
+      mime_type: linkType === 'image' ? 'image/url' : (linkType === 'video' ? 'video/url' : 'application/url'),
+      source: 'url',
+      _link_type: linkType,
+    })
+  }
+  return atts
+}
+
+// =====================================================
+// 【附件统一访问函数】—— 兼容多种附件格式的类型判断与 URL 获取
+// 后端返回的附件字段：
+//   - 图片 base64: base64_image
+//   - 图片 URL:    image_url / url / base64_image(以 http 开头)
+//   - 视频 URL:    video_url / url
+//   - 文档 URL:    doc_url / url
+// =====================================================
+
+function getAttachmentType(att) {
+  if (!att) return 'image'
+  // 优先使用前端标注的 _link_type
+  if (att._link_type === 'video' || att.video_url) return 'video'
+  if (att._link_type === 'document' || att.doc_url) return 'document'
+  return 'image'
+}
+
+function getAttachmentUrl(att) {
+  if (!att) return ''
+  if (att.video_url) return att.video_url
+  if (att.doc_url) return att.doc_url
+  if (att.image_url) return att.image_url
+  return att.url || att.base64 || att.base64_image || ''
+}
+
+function getAttachmentName(att) {
+  if (!att) return 'link'
+  if (att.name) return att.name
+  const url = getAttachmentUrl(att)
+  return extractUrlName(url)
+}
+
+/** 附件预览列表（仅包含图片，跳过视频/文档，避免被当作图片尝试加载） */
+function getAttachmentPreviewList(attachments) {
+  if (!attachments || attachments.length === 0) return []
+  return attachments
+    .filter(a => getAttachmentType(a) === 'image')
+    .map(a => getAttachmentUrl(a))
+}
+
+/** 计算图片附件在预览列表中的索引（因为附件可能混合视频/文档） */
+function getImageAttachmentIndex(attachments, currentIdx) {
+  if (!attachments) return 0
+  let imageIdx = 0
+  for (let i = 0; i < currentIdx; i++) {
+    if (getAttachmentType(attachments[i]) === 'image') {
+      imageIdx++
+    }
+  }
+  return imageIdx
 }
 </script>
 
@@ -1382,6 +1529,48 @@ function getImageIndex(mediaItems, currentIdx) {
   justify-content: center;
   background: rgba(255, 100, 100, 0.1);
   color: #ff8080;
+}
+
+/* =====================================================
+ * 新增：视频链接附件样式（用户消息中展示的可播放视频块）
+ * ===================================================== */
+.attachment-video {
+  max-width: 280px;
+  max-height: 200px;
+  border-radius: 8px;
+  border: 1px solid rgba(100, 150, 220, 0.3);
+  background: #000;
+  display: block;
+}
+
+/* =====================================================
+ * 新增：文档链接附件样式（用户消息中展示的文档卡片）
+ * ===================================================== */
+.attachment-doc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: linear-gradient(135deg, rgba(80, 140, 255, 0.1) 0%, rgba(160, 120, 255, 0.1) 100%);
+  border: 1px solid rgba(100, 150, 220, 0.25);
+  border-radius: 8px;
+  color: #c9d6e8;
+  text-decoration: none;
+  font-size: 13px;
+  transition: all 0.2s ease;
+  max-width: 280px;
+}
+
+.attachment-doc:hover {
+  background: linear-gradient(135deg, rgba(80, 140, 255, 0.2) 0%, rgba(160, 120, 255, 0.2) 100%);
+  border-color: rgba(100, 150, 220, 0.5);
+}
+
+.attachment-doc .attachment-doc-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #a0c4ff;
 }
 
 .input-hint {

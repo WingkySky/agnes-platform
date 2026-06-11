@@ -375,9 +375,18 @@ async def send_message(
                     detail=f"单张参考图大小超过 5MB 限制: {att.get('name', 'unknown')}"
                 )
 
-            # 支持两种附件格式：base64 data URI 和 URL 链接
+            # =====================================================
+            # 支持四种附件格式：
+            #   1. base64 data URI     → base64_image
+            #   2. 图片 URL 链接        → image_url（传给 AI 多模态）
+            #   3. 视频 URL 链接        → video_url（仅展示，AI 当前不看视频）
+            #   4. 文档 URL 链接        → doc_url（仅展示，AI 当前不读文档）
+            # =====================================================
             base64_image = att.get("base64_image", "")
             image_url = att.get("image_url", "")
+            video_url = att.get("video_url", "")
+            doc_url = att.get("doc_url", "")
+            link_type = att.get("_link_type", "")
 
             if base64_image and isinstance(base64_image, str) and base64_image.startswith("data:image/"):
                 # base64 上传图片
@@ -388,14 +397,35 @@ async def send_message(
                     "mime_type": att.get("mime_type", "image/png"),
                 })
             elif image_url and isinstance(image_url, str) and (image_url.startswith("http://") or image_url.startswith("https://")):
-                # URL 链接图片
+                # 图片 URL 链接
                 validated_attachments.append({
                     "name": att.get("name", "url_image"),
-                    "base64_image": "",  # base64 为空，由 chat_service 区分处理
+                    "base64_image": "",
                     "image_url": image_url,
                     "size": 0,
                     "mime_type": "image/url",
                     "source": "url",
+                    "_link_type": link_type or "image",
+                })
+            elif video_url and isinstance(video_url, str) and (video_url.startswith("http://") or video_url.startswith("https://")):
+                # 视频 URL 链接（前端自动识别的视频链接）
+                validated_attachments.append({
+                    "name": att.get("name", "video.mp4"),
+                    "video_url": video_url,
+                    "size": 0,
+                    "mime_type": "video/url",
+                    "source": "url",
+                    "_link_type": "video",
+                })
+            elif doc_url and isinstance(doc_url, str) and (doc_url.startswith("http://") or doc_url.startswith("https://")):
+                # 文档 URL 链接（前端自动识别的文档链接）
+                validated_attachments.append({
+                    "name": att.get("name", "document"),
+                    "doc_url": doc_url,
+                    "size": 0,
+                    "mime_type": "application/url",
+                    "source": "url",
+                    "_link_type": "document",
                 })
             else:
                 # 非法格式 —— 跳过并记录警告，不阻塞整个请求
@@ -431,23 +461,47 @@ async def send_message(
     )
     all_messages = result.scalars().all()
 
-    # 构建对话历史（包含附件上下文标注，帮助 AI 区分不同轮次的参考图）
+    # 构建对话历史（包含附件上下文标注，帮助 AI 区分不同轮次的参考图/视频/文档）
     chat_history = []
     for msg in all_messages:
         if msg.role in ("user", "assistant"):
             content = msg.content or ""
-            # 如果用户消息有附件，在内容中标注（帮助 AI 区分不同轮次的参考图）
+            # 如果用户消息有附件，在内容中标注（帮助 AI 区分不同轮次的参考图/视频/文档）
             if msg.role == "user" and msg.attachments and len(msg.attachments) > 0:
                 att_count = len(msg.attachments)
-                # 区分上传图片和 URL 链接
-                url_count = sum(1 for a in msg.attachments if a.get("source") == "url" or a.get("image_url"))
-                if url_count > 0 and url_count < att_count:
-                    att_note = f"\n[用户在本轮提供了 {att_count} 张参考图片（含 {url_count} 张链接图片）]"
-                elif url_count == att_count:
-                    att_note = f"\n[用户在本轮提供了 {att_count} 张链接图片]"
+                # =====================================================
+                # 按类型统计附件：
+                #   - image 类：base64_image 或 image_url（AI 可以看图）
+                #   - video 类：video_url（AI 当前不看视频，仅文字告知）
+                #   - document 类：doc_url（AI 当前不读文档，仅文字告知）
+                # =====================================================
+                image_count = sum(
+                    1 for a in msg.attachments
+                    if a.get("base64_image") or a.get("image_url")
+                )
+                video_count = sum(1 for a in msg.attachments if a.get("video_url"))
+                doc_count = sum(1 for a in msg.attachments if a.get("doc_url"))
+
+                note_parts = []
+                if image_count > 0:
+                    has_base64 = any(a.get("base64_image") and a["base64_image"].startswith("data:image/") for a in msg.attachments if a.get("base64_image"))
+                    if has_base64 and image_count > 1:
+                        note_parts.append(f"{image_count} 张参考图片")
+                    elif has_base64:
+                        note_parts.append(f"{image_count} 张上传的参考图片")
+                    else:
+                        note_parts.append(f"{image_count} 张链接图片")
+                if video_count > 0:
+                    note_parts.append(f"{video_count} 个视频链接（AI 当前无法观看视频内容，请以用户描述为准）")
+                if doc_count > 0:
+                    note_parts.append(f"{doc_count} 个文档链接（AI 当前无法读取文档内容，请以用户描述为准）")
+
+                if note_parts:
+                    att_note = f"\n[用户在本轮提供了: {', '.join(note_parts)}]"
+                    content = (content + att_note) if content else att_note.strip()
                 else:
-                    att_note = f"\n[用户在本轮上传了 {att_count} 张参考图片]"
-                content = (content + att_note) if content else att_note.strip()
+                    att_note = f"\n[用户在本轮提供了 {att_count} 个参考附件]"
+                    content = (content + att_note) if content else att_note.strip()
             # 如果 assistant 消息包含已生成的媒体项，注入上下文信息
             # 让 AI 知道之前生成了什么图片/视频，以便后续对话中正确引用
             if msg.role == "assistant" and msg.media_items and len(msg.media_items) > 0:
