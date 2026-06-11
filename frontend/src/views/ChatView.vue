@@ -28,37 +28,47 @@
           @click="handleSwitchSession(session.id)"
         >
           <div class="session-info">
-            <span class="session-title">{{ session.title || t('chat.newChat') }}</span>
+            <!-- 标题：溢出缩略显示，悬停时通过 tooltip 显示完整内容 -->
+            <span
+              class="session-title"
+              :title="session.title || t('chat.newChat')"
+            >{{ session.title || t('chat.newChat') }}</span>
             <span class="session-time">{{ formatTime(session.updated_at) }}</span>
           </div>
-          <div class="session-actions">
-            <!-- AI 总结标题按钮 -->
-            <el-button
-              class="session-action-btn"
-              :icon="MagicStick"
-              size="small"
-              text
-              :title="t('chat.autoSummarize')"
-              @click.stop="handleAutoSummarize(session.id)"
-            />
-            <!-- 编辑标题按钮 -->
-            <el-button
-              class="session-action-btn"
-              :icon="Edit"
-              size="small"
-              text
-              :title="t('chat.renameSession')"
-              @click.stop="handleRenameSession(session)"
-            />
-            <!-- 删除按钮 -->
-            <el-button
-              class="session-action-btn"
-              :icon="Delete"
-              size="small"
-              text
-              :title="t('chat.deleteSession')"
-              @click.stop="handleDeleteSession(session.id)"
-            />
+          <!-- 右侧操作区：三点菜单（点击后弹出操作选项） -->
+          <div
+            class="session-actions"
+            @click.stop
+          >
+            <el-dropdown
+              trigger="click"
+              @command="(cmd) => handleSessionAction(cmd, session)"
+            >
+              <button
+                type="button"
+                class="session-menu-btn"
+                :title="t('chat.moreActions')"
+              >
+                <el-icon :size="14"><MoreFilled /></el-icon>
+              </button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    :icon="MagicStick"
+                    command="summarize"
+                  >{{ t('chat.autoSummarize') }}</el-dropdown-item>
+                  <el-dropdown-item
+                    :icon="Edit"
+                    command="rename"
+                  >{{ t('chat.renameSession') }}</el-dropdown-item>
+                  <el-dropdown-item
+                    :icon="Delete"
+                    command="delete"
+                    divided
+                  >{{ t('chat.deleteSession') }}</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </div>
 
@@ -369,7 +379,7 @@ import { ref, onMounted, onActivated, nextTick, watch, computed } from 'vue'
 import {
   Plus, Delete, User, Monitor, Picture, VideoPlay,
   Loading, Check, WarningFilled, Promotion, ChatDotRound,
-  Edit, MagicStick, Close, Link,
+  Edit, MagicStick, Close, Link, MoreFilled,
 } from '@element-plus/icons-vue'
 import { useI18n } from '@/i18n'
 import { useChatStore } from '@/stores/chat'
@@ -436,6 +446,21 @@ watch(
 // =====================================================
 // 交互处理
 // =====================================================
+
+/** 三点菜单统一处理函数（总结 / 重命名 / 删除） */
+function handleSessionAction(cmd, session) {
+  switch (cmd) {
+    case 'summarize':
+      handleAutoSummarize(session.id)
+      break
+    case 'rename':
+      handleRenameSession(session)
+      break
+    case 'delete':
+      handleDeleteSession(session.id)
+      break
+  }
+}
 
 /** 新建会话 */
 async function handleNewSession() {
@@ -897,18 +922,33 @@ function getImageIndex(mediaItems, currentIdx) {
   gap: 2px;
   opacity: 0;
   transition: opacity 0.2s;
+  flex-shrink: 0;
+  margin-left: 8px;
 }
 
 .session-item:hover .session-actions {
   opacity: 1;
 }
 
-.session-action-btn {
-  color: #8ba3c9 !important;
+/* 三点菜单按钮 */
+.session-menu-btn {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: #8ba3c9;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  padding: 0;
 }
 
-.session-action-btn:hover {
-  color: #a0d4ff !important;
+.session-menu-btn:hover {
+  background: rgba(120, 170, 255, 0.15);
+  color: #a0d4ff;
 }
 
 .session-empty {

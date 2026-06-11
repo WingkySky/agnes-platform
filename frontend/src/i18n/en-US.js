@@ -345,6 +345,7 @@ export default {
     sendFailed: 'Failed to send',
     deleted: 'Conversation deleted',
     // ------ Session title management ------
+    moreActions: 'More actions',
     renameSession: 'Rename conversation',
     autoSummarize: 'AI auto-summarize title',
     enterNewTitle: 'Enter new conversation title',

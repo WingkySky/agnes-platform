@@ -346,6 +346,7 @@ export default {
     sendFailed: '发送失败',
     deleted: '对话已删除',
     // ------ 会话标题管理 ------
+    moreActions: '更多操作',
     renameSession: '重命名对话',
     autoSummarize: 'AI 自动总结标题',
     enterNewTitle: '请输入新的对话标题',
