@@ -12,7 +12,7 @@
 # =====================================================
 
 import logging
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 
 import httpx
 
@@ -134,15 +134,14 @@ class AgnesAIClient:
         model: str = "agnes-image-2.1-flash",
         size: str = "1024x1024",
         response_format: str = "url",
-        base64_image: Optional[str] = None,
-        image_url: Optional[str] = None,
+        base64_image: Optional[str] = None,           # 保留：向后兼容（单图）
+        image_url: Optional[str] = None,               # 保留：向后兼容（单图）
+        base64_images: Optional[List[str]] = None,     # 【新增】多图 base64 数组
+        image_urls: Optional[List[str]] = None,        # 【新增】多图 URL 数组
         quality: str = "standard",
     ) -> Dict[str, Any]:
         """
         调用 Agnes AI 生成图片（异步等待，不阻塞其他请求的事件循环）。
-        - 文生图：不提供 base64_image 和 image_url，使用 agnes-image-2.1-flash
-        - 图生图（上传图片）：提供 base64_image（参考图的 base64 数据）
-        - 图生图（链接图片）：提供 image_url（公网可访问的图片 URL）
 
         图生图 API 规范（Agnes Image 官方文档）：
           - agnes-image-2.1-flash 支持文生图和图生图（推荐）
@@ -153,12 +152,28 @@ class AgnesAIClient:
           - 图生图不需要传 tags: ["img2img"]
           - 文生图不要传 extra_body（否则会报 UnsupportedParamsError）
           - quality、n、size 等参数放在请求体顶层
+
+        【多图参考改造】：
+          - 参数优先级：base64_images / image_urls（新）→ base64_image / image_url（旧）
+          - 最终会把所有有效参考图打包进 extra_body.image 数组，交给 Agnes 官方多图合成能力
         """
         url = f"{self.base_url}/images/generations"
 
-        # 图生图：确定参考图来源（base64_image 和 image_url 二选一）
-        # 优先使用 base64_image（本地上传），其次使用 image_url（链接图片）
-        ref_image = base64_image or image_url
+        # ── 收集参考图（新字段优先，回退到旧字段） ──
+        ref_images: List[str] = []
+        if base64_images:
+            for img in base64_images:
+                if img and isinstance(img, str) and img.strip():
+                    ref_images.append(img)
+        if image_urls:
+            for u in image_urls:
+                if u and isinstance(u, str) and u.strip():
+                    ref_images.append(u)
+        # 如果新字段为空，回退到旧字段（与之前的单图行为一致）
+        if not ref_images and base64_image and base64_image.strip():
+            ref_images.append(base64_image)
+        if not ref_images and image_url and image_url.strip():
+            ref_images.append(image_url)
 
         body = {
             "model": model,
@@ -168,38 +183,42 @@ class AgnesAIClient:
             "n": 1,
         }
 
-        if ref_image:
-            # 图生图：构建 extra_body
-            # 处理图片数据：base64 转 data URI，URL 直接传入
-            if ref_image.startswith("data:"):
-                # 已经是完整的 Data URI，直接使用
-                image_value = ref_image
-            elif ref_image.startswith("http://") or ref_image.startswith("https://"):
-                # 公网 URL，直接传入（Agnes API 原生支持）
-                image_value = ref_image
-            else:
-                # 纯 base64，需要补上 Data URI 前缀
-                image_value = f"data:image/png;base64,{ref_image}"
+        if ref_images:
+            # 图生图：构建 extra_body（image 为数组）
+            # 处理图片数据：data URI / URL / 纯 base64（补前缀）
+            normalized = []
+            for img in ref_images:
+                if img.startswith("data:"):
+                    # 已经是完整的 Data URI，直接使用
+                    normalized.append(img)
+                elif img.startswith("http://") or img.startswith("https://"):
+                    # 公网 URL，直接传入（Agnes API 原生支持）
+                    normalized.append(img)
+                else:
+                    # 纯 base64，补上 Data URI 前缀
+                    normalized.append(f"data:image/png;base64,{img}")
 
             # extra_body 结构：image 为参考图数组，response_format 指定输出格式
             # 注意：image 和 response_format 都必须放在 extra_body 中，不能放顶层
             extra = {
-                "image": [image_value],
+                "image": normalized,
                 "response_format": response_format,
             }
 
             body["extra_body"] = extra
+            logger.info(
+                "[图片生成] 图生图模式: model=%s, size=%s, ref_images=%d 张, prompt=%s",
+                model, size, len(normalized), prompt[:80],
+            )
         elif response_format == "b64_json":
             # 文生图的 b64_json 输出使用 return_base64（不传 extra_body）
             body["return_base64"] = True
+            logger.info("[图片生成] 文生图模式(b64_json): model=%s, size=%s, prompt=%s",
+                        model, size, prompt[:80])
+        else:
+            logger.info("[图片生成] 文生图模式: model=%s, size=%s, prompt=%s",
+                        model, size, prompt[:80])
 
-        img_source = "base64" if base64_image else ("url" if image_url else "none")
-        logger.info(
-            "[图片生成] 调用 Agnes AI: prompt=%s...  size=%s  model=%s  mode=%s  source=%s",
-            prompt[:60], size, model,
-            "image2image" if ref_image else "text2image",
-            img_source,
-        )
         return await self._post(url, body)
 
     # ---------- 视频任务创建 ----------

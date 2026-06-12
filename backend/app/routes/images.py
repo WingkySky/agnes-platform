@@ -55,19 +55,27 @@ async def create_image_task_async(req: ImageGenerationRequest):
     except Exception:
         raise HTTPException(status_code=400, detail="尺寸格式错误，应为 '宽x高'，如 '1024x1024'")
 
-    # 创建异步任务
+    # 【多图参考改造点】合并 all_reference_images，区分 URL 和 base64
     params = {
         "model": req.model,
         "size": size,
         "response_format": req.response_format,
-        "mode": "image2image" if (req.base64_image or req.image_url) else "text2image",
+        "mode": "image2image" if req.is_image_to_image else "text2image",
     }
 
-    # 图生图：将参考图传入 params，供 image_poller 后台生成使用
-    if req.base64_image:
-        params["base64_image"] = req.base64_image
-    if req.image_url:
-        params["image_url"] = req.image_url
+    if req.is_image_to_image:
+        # 这里已经是合并后的统一数组（新旧字段都已合并）
+        ref_imgs = req.all_reference_images
+        b64_imgs = [img for img in ref_imgs if not img.startswith("http")]
+        url_imgs = [img for img in ref_imgs if img.startswith("http")]
+        if b64_imgs:
+            params["base64_images"] = b64_imgs
+        if url_imgs:
+            params["image_urls"] = url_imgs
+        logger.info(
+            "[图片API] 异步图生图任务创建: ref_images=%d 张 (b64=%d, url=%d), size=%s, model=%s",
+            len(ref_imgs), len(b64_imgs), len(url_imgs), size, req.model,
+        )
 
     task = await image_poller_manager.create_task(
         prompt=req.prompt,
@@ -150,26 +158,41 @@ async def create_image_generation(req: ImageGenerationRequest, db: AsyncSession 
             detail="Agnes AI API Key 未配置，请在 backend/.env 中设置 AGNES_API_KEY",
         )
 
-    # 参考图大小校验
-    if req.base64_image:
-        estimated_bytes = len(req.base64_image) * 3 / 4
-        if estimated_bytes > settings.max_upload_bytes:
+    # 参考图大小校验（多图：每张图单独校验大小
+    if req.is_image_to_image:
+        # 汇总所有 base64 图的总大小（近似：每张单独校验
+        total_bytes = 0
+        for img in req.all_reference_images:
+            if not img.startswith("http"):
+                # base64 图（含前缀或纯 base64）
+                pure_b64 = img.split(",")[-1] if "," in img else img
+                total_bytes += len(pure_b64) * 3 / 4
+        if total_bytes > settings.max_upload_bytes:
             raise HTTPException(
                 status_code=413,
-                detail=f"图片过大，最大允许 {settings.max_upload_size_mb}MB",
+                detail=f"参考图总大小过大，最大允许 {settings.max_upload_size_mb}MB",
             )
 
     # 调用 Agnes AI
+    # 【多图参考改造点】新字段优先，回退到旧字段以保持兼容
     try:
+        ref_imgs = req.all_reference_images
+        b64_imgs = [img for img in ref_imgs if not img.startswith("http")]
+        url_imgs = [img for img in ref_imgs if img.startswith("http")]
         result = await agnes_client.create_image(
             prompt=req.prompt,
             model=req.model,
             size=req.size,
             response_format=req.response_format,
-            base64_image=req.base64_image,
-            image_url=req.image_url,
+            base64_images=b64_imgs or None,
+            image_urls=url_imgs or None,
             quality="standard",
         )
+        if ref_imgs:
+            logger.info(
+                "[图片API] 同步图生图请求完成: ref_images=%d 张 (b64=%d, url=%d)",
+                len(ref_imgs), len(b64_imgs), len(url_imgs),
+            )
     except Exception as e:
         logger.error("[图片生成] Agnes AI 调用失败: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
@@ -201,7 +224,7 @@ async def create_image_generation(req: ImageGenerationRequest, db: AsyncSession 
         params = {
             "size": req.size,
             "response_format": req.response_format,
-            "mode": "image2image" if (req.base64_image or req.image_url) else "text2image",
+            "mode": "image2image" if req.is_image_to_image else "text2image",
         }
         record = Generation(
             type="image",

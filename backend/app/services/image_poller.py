@@ -153,8 +153,11 @@ class ImagePollerManager:
                 model=task.params.get("model", "agnes-image-2.1-flash"),
                 size=task.params.get("size", "1024x1024"),
                 response_format=task.params.get("response_format", "url"),
+                # 【多图参考改造点】新字段优先，回退到旧字段以保持兼容
                 base64_image=task.params.get("base64_image"),
                 image_url=task.params.get("image_url"),
+                base64_images=task.params.get("base64_images"),
+                image_urls=task.params.get("image_urls"),
                 quality=task.params.get("quality", "standard"),
             )
 
@@ -232,7 +235,8 @@ class ImagePollerManager:
                     model=task.params.get("model", "agnes-image-2.1-flash"),
                     params={
                         k: v for k, v in task.params.items()
-                        if k not in ("base64_image", "image_url")  # 不保存大的 base64 和 URL 参数
+                        # 不保存大的 base64 / URL 数组，避免数据库膨胀
+                        if k not in ("base64_image", "image_url", "base64_images", "image_urls")
                     },
                     mode=task.params.get("mode"),
                     result_url=task.result_url or "(base64)",

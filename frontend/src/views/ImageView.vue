@@ -261,7 +261,7 @@ const mode = ref('text2image')
 const prompt = ref('')
 const size = ref('1024x1024')
 const model = ref('agnes-image-2.1-flash')
-const referenceFile = ref(null)
+const referenceFileList = ref([])   // 【多图】数组
 
 // ---------- 使用全局 Store 管理任务 ----------
 const queue = useTaskQueueStore()
@@ -337,11 +337,12 @@ function appendStylePrompt(tpl) {
   }
 }
 
-function handleImageChange(file) {
-  referenceFile.value = file
+function handleImageChange(fileList) {
+  // fileList 为数组（可能为 null 表示清空）
+  referenceFileList.value = Array.isArray(fileList) ? fileList : (fileList ? [fileList] : [])
 }
 function handleImageClear() {
-  referenceFile.value = null
+  referenceFileList.value = []
 }
 
 // ---------- 提交任务 ----------
@@ -350,7 +351,7 @@ async function handleGenerate() {
     ElMessage.warning(t('message.pleaseFillPrompt'))
     return
   }
-  if (mode.value === 'image2image' && !referenceFile.value) {
+  if (mode.value === 'image2image' && referenceFileList.value.length === 0) {
     ElMessage.warning(t('message.pleaseUploadRefImage'))
     return
   }
@@ -365,15 +366,16 @@ async function handleGenerate() {
     size: size.value,
     mode: mode.value,
   }
-                  // 图生图：区分上传图片（base64）和链接图片（URL）
-  if (mode.value === 'image2image' && referenceFile.value) {
-    if (referenceFile.value.source === 'url' && referenceFile.value.url) {
-      // URL 模式：直接传公网链接
-      params.image_url = referenceFile.value.url
-    } else if (referenceFile.value.base64) {
-      // 文件上传模式：传 base64
-      params.base64_image = referenceFile.value.base64
-    }
+  // 【多图】图生图时：区分为 base64_images 与 image_urls
+  if (mode.value === 'image2image' && referenceFileList.value.length > 0) {
+    const b64Imgs = referenceFileList.value
+      .filter(f => f.source === 'file' && f.base64)
+      .map(f => f.base64)
+    const urlImgs = referenceFileList.value
+      .filter(f => f.source === 'url' && f.url)
+      .map(f => f.url)
+    if (b64Imgs.length) params.base64_images = b64Imgs
+    if (urlImgs.length) params.image_urls = urlImgs
   }
 
   try {

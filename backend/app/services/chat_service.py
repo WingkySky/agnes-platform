@@ -1195,9 +1195,12 @@ class ChatService:
         if att_count == 0 and messages:
             history_images = self._collect_history_images(messages)
             if history_images:
-                # 取最近一张历史图片当参考图
-                effective_attachments = [history_images[-1]]
-                logger.info("[Chat] generate_image: 本轮无附件，使用会话历史最近一张图片作为参考图")
+                # 【改造点】之前只取一张，现在取全部历史图片（最新 8 张）作为参考图
+                effective_attachments = history_images[-8:]
+                logger.info(
+                    "[Chat] generate_image: 本轮无附件，使用会话历史 %d 张图片作为参考图（最多保留 8 张）",
+                    len(effective_attachments),
+                )
 
         # ── 决策最终模式（基于 effective_attachments 而不是原始 attachments）
         eff_count = len(effective_attachments) if effective_attachments else 0
@@ -1250,19 +1253,37 @@ class ChatService:
             }
 
             if use_image and effective_attachments and len(effective_attachments) > 0:
-                ref = effective_attachments[0]
-                # 区分参考图来源：base64 上传 or URL 链接（含历史生成图 URL）
-                if ref.get("image_url"):
-                    # URL 链接图片（包括历史生成图）：直接传 image_url
-                    params["image_url"] = ref["image_url"]
-                    logger.info("[Chat] 图生图使用 URL 参考图: %s", ref["image_url"][:100])
-                elif ref.get("base64_image") and ref["base64_image"].startswith("data:image/"):
-                    # base64 上传图片
-                    params["base64_image"] = ref["base64_image"]
-                elif ref.get("base64_image") and ref["base64_image"].startswith("http"):
-                    # 历史图片的 URL 存储在 base64_image 字段里（_collect_history_images 的兼容写法）
-                    params["image_url"] = ref["base64_image"]
-                    logger.info("[Chat] 图生图使用历史图片 URL: %s", ref["base64_image"][:100])
+                # ── 【改造点】之前只取第一张，现在遍历全部附件收集为多图数组
+                b64_list: List[str] = []
+                url_list: List[str] = []
+
+                for ref in effective_attachments:
+                    img_url = ref.get("image_url")
+                    b64_img = ref.get("base64_image")
+
+                    # 优先使用 image_url（公网 URL 体积小、稳定）
+                    if img_url and isinstance(img_url, str) and img_url.strip():
+                        url_list.append(img_url)
+                        continue
+
+                    # base64_image 字段里如果已经是 URL（历史图片兼容写法）
+                    if b64_img and isinstance(b64_img, str) and b64_img.strip():
+                        if b64_img.startswith("http") or b64_img.startswith("data:image/"):
+                            b64_list.append(b64_img)
+                            continue
+                        # 兜底：纯 base64 字符串（没有前缀）
+                        b64_list.append(b64_img)
+
+                # 注入到 params（给 image_poller → agnes_client.create_image 使用）
+                if b64_list:
+                    params["base64_images"] = b64_list
+                if url_list:
+                    params["image_urls"] = url_list
+
+                logger.info(
+                    "[Chat] 图生图参考图汇总: base64=%d 张, url=%d 张, 总计=%d 张",
+                    len(b64_list), len(url_list), len(b64_list) + len(url_list),
+                )
 
             task = await image_poller_manager.create_task(
                 prompt=prompt,
