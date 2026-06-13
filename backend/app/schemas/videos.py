@@ -59,13 +59,12 @@ class VideoGenerationRequest(BaseModel):
     def check_mode_requirements(self):
         """
         根据 mode 校验必填字段：
-        - image2video 但没有 image 字段时，自动降级为 text2video
+        - image2video 必须有 image 字段且非空
         - keyframes 必须有 images 数组且至少 1 张有效图片（过滤空值后）
         """
-        # 图生视频但没有提供图片时，自动降级为文生视频
-        if self.mode == "image2video" and not self.image and (not self.images or len(self.images) == 0):
-            self.mode = "text2video"
-            return self
+        if self.mode == "image2video":
+            if not self.image or not self.image.strip():
+                raise ValueError("image2video 模式需提供参考图（image 字段不能为空）")
         if self.mode == "keyframes":
             # 先过滤 images 中的空值/None/空字符串
             if self.images:

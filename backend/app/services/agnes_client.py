@@ -277,6 +277,14 @@ class AgnesAIClient:
         ref_images_all = []
         if image and image.strip():
             ref_images_all.append(image.strip())
+            logger.info(
+                "[视频生成] 收到 image: type=%s len=%d preview=%s",
+                "data_uri" if image.strip().lower().startswith("data:") else
+                "url" if image.strip().lower().startswith(("http://", "https://")) else
+                "base64",
+                len(image.strip()),
+                image.strip()[:100],
+            )
         if images and len(images) > 0:
             for img in images:
                 if img and isinstance(img, str) and img.strip():
@@ -291,23 +299,37 @@ class AgnesAIClient:
             for img in ref_images_all:
                 lowered = img.strip().lower()
                 if lowered.startswith("data:"):
-                    normalized.append(img.strip())  # 完整 Data URI，直接使用
+                    # 完整 Data URI → 提取 base64 部分，补齐 padding 后再重构
+                    # 浏览器 FileReader.readAsDataURL 有时省略末尾 '=' padding
+                    comma_idx = img.strip().rfind(',')
+                    if comma_idx >= 0:
+                        prefix = img.strip()[:comma_idx + 1]  # "data:image/...;base64,"
+                        b64_content = img.strip()[comma_idx + 1:]
+                    else:
+                        # 没有逗号（异常情况），原样使用
+                        normalized.append(img.strip())
+                        continue
+                    # 补齐 base64 padding
+                    pad = len(b64_content) % 4
+                    if pad:
+                        b64_content += '=' * (4 - pad)
+                    normalized.append(f"{prefix}{b64_content}")
                 elif lowered.startswith("http://") or lowered.startswith("https://"):
                     normalized.append(img.strip())  # 公网 URL
                 else:
-                    # 纯 base64 → 补上 Data URI 前缀（image/png 兼容性最好）
-                    normalized.append(f"data:image/png;base64,{img.strip()}")
+                    # 纯 base64 → 补齐 padding 后再补上 Data URI 前缀
+                    b64 = img.strip()
+                    pad = len(b64) % 4
+                    if pad:
+                        b64 += '=' * (4 - pad)
+                    normalized.append(f"data:image/png;base64,{b64}")
 
-            # 根据图片张数构造 extra_body（同时传顶层 image/image_end 兼容文档参数表和 curl 示例）：
+            # 根据图片张数构造 extra_body（Agnes Video V2.0 规范）：
             #   - 1 张：extra_body = {"image": 第一张} （图生视频，单张起始帧）
             #   - 2+ 张：extra_body = {"image": 第一张, "image_end": 最后一张} （首尾帧图生视频）
             body["extra_body"] = {"image": normalized[0]}
             if len(normalized) >= 2:
                 body["extra_body"]["image_end"] = normalized[-1]
-            # 同时在顶层也放一份 image 以兼容参数表写法
-            body["image"] = normalized[0]
-            if len(normalized) >= 2:
-                body["image_end"] = normalized[-1]
 
         logger.info(
             f"[视频生成] 创建任务: prompt={prompt[:60]}...  "

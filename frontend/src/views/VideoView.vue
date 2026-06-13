@@ -406,14 +406,24 @@ function addKeyframe() {
     ElMessage.warning(t('message.maxKeyframes'))
   }
 }
-function handleImageChange(file) {
-  referenceFile.value = file
+function handleImageChange(files) {
+  if (!files || !files.length) {
+    referenceFile.value = null
+    return
+  }
+  // ImageUploader emit 的是数组，image2video 只需取第一张
+  referenceFile.value = files[0]
 }
 function handleImageClear() {
   referenceFile.value = null
 }
-function handleKeyframeChange(idx, file) {
-  keyframes.value[idx] = file
+function handleKeyframeChange(idx, files) {
+  if (!files || !files.length) {
+    keyframes.value[idx] = null
+    return
+  }
+  // ImageUploader emit 的是数组，取第一张
+  keyframes.value[idx] = files[0]
 }
 function handleKeyframeClear(idx) {
   keyframes.value[idx] = null
@@ -446,14 +456,16 @@ async function startGenerate() {
     seed: seed.value ? Number(seed.value) : undefined,
   }
   if (mode.value === 'image2video' && referenceFile.value) {
-    params.image = referenceFile.value.base64 || referenceFile.value.url
+    // 优先使用 previewUrl（完整 Data URI，含前缀），避免后端手动补 base64 padding
+    // fallback 到 base64 或 url
+    params.image = referenceFile.value.previewUrl || referenceFile.value.base64 || referenceFile.value.url
   }
   if (mode.value === 'keyframes') {
     // 关键帧动画：过滤空卡片和无效图片，确保仅保留有效 base64/URL
     // 问题场景：用户添加了多个卡片但某些卡片没上传图片
     const imgs = keyframes.value
       .filter(Boolean)                              // 过滤 null/undefined 空卡片
-      .map(f => (f.base64 || f.url || '').trim()) // 提取有效图片数据
+      .map(f => (f.previewUrl || f.base64 || f.url || '').trim()) // 优先用完整 Data URI
       .filter(img => img.length > 0)               // 过滤空字符串
     if (imgs.length === 0) {
       ElMessage.warning(t('message.pleaseUploadKeyframeImages'))

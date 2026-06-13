@@ -22,7 +22,6 @@ const client = axios.create({
 // ---------- 请求拦截 ----------
 client.interceptors.request.use(
   (config) => {
-    // 标记请求开始（可扩展 loading）
     return config
   },
   (error) => Promise.reject(error)
