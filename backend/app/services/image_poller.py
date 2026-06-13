@@ -158,7 +158,6 @@ class ImagePollerManager:
                 image_url=task.params.get("image_url"),
                 base64_images=task.params.get("base64_images"),
                 image_urls=task.params.get("image_urls"),
-                quality=task.params.get("quality", "standard"),
             )
 
             # 解析结果

@@ -64,10 +64,11 @@ async def create_image_task_async(req: ImageGenerationRequest):
     }
 
     if req.is_image_to_image:
-        # 这里已经是合并后的统一数组（新旧字段都已合并）
+        # 【修复】这里已经是合并后的统一数组（新旧字段都已合并）。
+        # 用小写 + strip 后的判断来区分 URL 和 base64，避免大小写（HTTP/Https）或前后空格导致误判。
         ref_imgs = req.all_reference_images
-        b64_imgs = [img for img in ref_imgs if not img.startswith("http")]
-        url_imgs = [img for img in ref_imgs if img.startswith("http")]
+        b64_imgs = [img for img in ref_imgs if not img.strip().lower().startswith("http")]
+        url_imgs = [img.strip() for img in ref_imgs if img.strip().lower().startswith("http")]
         if b64_imgs:
             params["base64_images"] = b64_imgs
         if url_imgs:
@@ -163,8 +164,8 @@ async def create_image_generation(req: ImageGenerationRequest, db: AsyncSession 
         # 汇总所有 base64 图的总大小（近似：每张单独校验
         total_bytes = 0
         for img in req.all_reference_images:
-            if not img.startswith("http"):
-                # base64 图（含前缀或纯 base64）
+            if not img.strip().lower().startswith("http"):
+                # base64 图（含前缀或纯 base64）—— 【修复】用最后一个逗号分割，兼容带参数的 data URI
                 pure_b64 = img.split(",")[-1] if "," in img else img
                 total_bytes += len(pure_b64) * 3 / 4
         if total_bytes > settings.max_upload_bytes:
@@ -177,8 +178,9 @@ async def create_image_generation(req: ImageGenerationRequest, db: AsyncSession 
     # 【多图参考改造点】新字段优先，回退到旧字段以保持兼容
     try:
         ref_imgs = req.all_reference_images
-        b64_imgs = [img for img in ref_imgs if not img.startswith("http")]
-        url_imgs = [img for img in ref_imgs if img.startswith("http")]
+        # 【修复】URL 判断改为小写 + strip，避免 HTTP/Https 等大小写或前后空格导致误判
+        b64_imgs = [img for img in ref_imgs if not img.strip().lower().startswith("http")]
+        url_imgs = [img.strip() for img in ref_imgs if img.strip().lower().startswith("http")]
         result = await agnes_client.create_image(
             prompt=req.prompt,
             model=req.model,
@@ -186,7 +188,6 @@ async def create_image_generation(req: ImageGenerationRequest, db: AsyncSession 
             response_format=req.response_format,
             base64_images=b64_imgs or None,
             image_urls=url_imgs or None,
-            quality="standard",
         )
         if ref_imgs:
             logger.info(

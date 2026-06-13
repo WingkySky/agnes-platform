@@ -163,12 +163,20 @@ function validateFile(file) {
 }
 
 // File -> base64（返回 { name, base64(纯), previewUrl, size, source }
+// 【修复】使用 indexOf + slice 替代 split，以兼容某些浏览器返回的带参数的 data URI
+// （例如 data:image/jpeg;name=test.jpg;base64,xxxx），避免 split 取到 undefined 导致上传失败
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => {
       const fullBase64 = reader.result
-      const pureBase64 = fullBase64.split(';base64,')[1]
+      const marker = ';base64,'
+      const markerIndex = fullBase64.indexOf(marker)
+      // markerIndex + marker.length 后就是纯 base64 内容；
+      // 若找不到标记则退化为返回完整字符串（保险兜底）
+      const pureBase64 = markerIndex >= 0
+        ? fullBase64.slice(markerIndex + marker.length)
+        : fullBase64
       resolve({
         name: file.name,
         base64: pureBase64,

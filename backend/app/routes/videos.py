@@ -65,14 +65,22 @@ async def create_video_task(req: VideoGenerationRequest):
         logger.error("[视频生成] 创建任务失败: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
 
+    result_data = result.get("data")
+    if isinstance(result_data, list) and result_data:
+        first_result = result_data[0]
+    elif isinstance(result_data, dict):
+        first_result = result_data
+    else:
+        first_result = {}
+
     video_id = result.get("video_id") or (
-        result.get("data").get("video_id") if isinstance(result.get("data"), dict) else None
+        first_result.get("video_id") if isinstance(first_result, dict) else None
     )
     task_id = (
         result.get("task_id")
         or result.get("id")
-        or (result.get("data").get("task_id") if isinstance(result.get("data"), dict) else None)
-        or (result.get("data").get("id") if isinstance(result.get("data"), dict) else None)
+        or (first_result.get("task_id") if isinstance(first_result, dict) else None)
+        or (first_result.get("id") if isinstance(first_result, dict) else None)
     )
 
     if not video_id and not task_id:

@@ -90,6 +90,7 @@ class AgnesAIClient:
         """
         发送 POST 请求到 Agnes AI API（使用连接池）
         """
+        logger.info("[AgnesAIClient] POST %s body=%s", url, body)
         response = await self.client.post(url, json=body, headers=self._headers)
         return self._parse_response(response)
 
@@ -138,24 +139,21 @@ class AgnesAIClient:
         image_url: Optional[str] = None,               # 保留：向后兼容（单图）
         base64_images: Optional[List[str]] = None,     # 【新增】多图 base64 数组
         image_urls: Optional[List[str]] = None,        # 【新增】多图 URL 数组
-        quality: str = "standard",
     ) -> Dict[str, Any]:
         """
         调用 Agnes AI 生成图片（异步等待，不阻塞其他请求的事件循环）。
 
-        图生图 API 规范（Agnes Image 官方文档）：
-          - agnes-image-2.1-flash 支持文生图和图生图（推荐）
-          - agnes-image-2.0-flash 支持快速图像生成
-          - extra_body.image 为数组，值支持公网 URL 或 data URI（data:image/xxx;base64,...）
-          - image 必须放在 extra_body 中，不能放顶层
-          - response_format 必须放在 extra_body 中，放根级会 400
-          - 图生图不需要传 tags: ["img2img"]
-          - 文生图不要传 extra_body（否则会报 UnsupportedParamsError）
-          - quality、n、size 等参数放在请求体顶层
+        API 调用规范（严格按 Agnes Image 2.1 Flash 文档）：
+          - model、prompt、size → 顶层必填参数
+          - 图生图：image 放在 extra_body 中（2.1-flash 规范，不在顶层）
+          - return_base64: true → 文生图 Base64 输出（顶层参数）
+          - extra_body.response_format: "url" | "b64_json" → 输出格式（放顶层会 400）
+          - 文生图：不传入 image 字段
+          - 图生图：image 放在 extra_body.image 中
 
         【多图参考改造】：
-          - 参数优先级：base64_images / image_urls（新）→ base64_image / image_url（旧）
-          - 最终会把所有有效参考图打包进 extra_body.image 数组，交给 Agnes 官方多图合成能力
+          - 参数优先级：base64_images / image_urls（新字段，数组）→ base64_image / image_url（旧字段，单值）
+          - 所有有效参考图最终会归一化为 data URI 或公网 URL，统一放入 extra_body.image 数组
         """
         url = f"{self.base_url}/images/generations"
 
@@ -175,48 +173,53 @@ class AgnesAIClient:
         if not ref_images and image_url and image_url.strip():
             ref_images.append(image_url)
 
+        # 【核心修复】严格按 Agnes Image 2.1 Flash 文档构建请求体
+        #   - model、prompt、size → 顶层必填参数
+        #   - 图生图：image 放在 extra_body 中（2.1-flash 规范）
+        #   - 文生图 Base64 输出：顶层参数 return_base64: true
+        #   - response_format → 必须放在 extra_body 中（放顶层会 400）
         body = {
             "model": model,
             "prompt": prompt,
             "size": size,
-            "quality": quality,
-            "n": 1,
         }
 
         if ref_images:
-            # 图生图：构建 extra_body（image 为数组）
-            # 处理图片数据：data URI / URL / 纯 base64（补前缀）
+            # 【图生图模式】将参考图数组放在 extra_body 中（agnes-image-2.1-flash 规范）
+            # 对每个参考图进行归一化处理：
+            #   - 已经是完整 Data URI（data:image/xxx;base64,xxx）→ 直接使用
+            #   - 公网 URL（http:// / https://）→ 直接使用
+            #   - 纯 base64 字符串 → 补全 Data URI 前缀（默认 image/png）
             normalized = []
             for img in ref_images:
-                if img.startswith("data:"):
-                    # 已经是完整的 Data URI，直接使用
-                    normalized.append(img)
-                elif img.startswith("http://") or img.startswith("https://"):
-                    # 公网 URL，直接传入（Agnes API 原生支持）
-                    normalized.append(img)
+                lowered = img.strip().lower()
+                if lowered.startswith("data:"):
+                    normalized.append(img.strip())  # 完整 Data URI，直接使用
+                elif lowered.startswith("http://") or lowered.startswith("https://"):
+                    normalized.append(img.strip())  # 公网 URL
                 else:
-                    # 纯 base64，补上 Data URI 前缀
-                    normalized.append(f"data:image/png;base64,{img}")
+                    # 纯 base64 → 补上 Data URI 前缀（image/png 兼容性最好）
+                    normalized.append(f"data:image/png;base64,{img.strip()}")
 
-            # extra_body 结构：image 为参考图数组，response_format 指定输出格式
-            # 注意：image 和 response_format 都必须放在 extra_body 中，不能放顶层
-            extra = {
+            body["extra_body"] = {
                 "image": normalized,
                 "response_format": response_format,
             }
-
-            body["extra_body"] = extra
             logger.info(
-                "[图片生成] 图生图模式: model=%s, size=%s, ref_images=%d 张, prompt=%s",
-                model, size, len(normalized), prompt[:80],
+                "[图片生成] 图生图模式: model=%s, size=%s, ref_images=%d 张, format=%s, prompt=%s",
+                model, size, len(normalized), response_format, prompt[:80],
             )
         elif response_format == "b64_json":
-            # 文生图的 b64_json 输出使用 return_base64（不传 extra_body）
+            # 【文生图 + Base64 输出】使用顶层参数 return_base64（文档规范）
             body["return_base64"] = True
-            logger.info("[图片生成] 文生图模式(b64_json): model=%s, size=%s, prompt=%s",
+            logger.info("[图片生成] 文生图模式(Base64): model=%s, size=%s, prompt=%s",
                         model, size, prompt[:80])
         else:
-            logger.info("[图片生成] 文生图模式: model=%s, size=%s, prompt=%s",
+            # 【文生图 + URL 输出】response_format 放在 extra_body（放顶层会 400）
+            body["extra_body"] = {
+                "response_format": "url",
+            }
+            logger.info("[图片生成] 文生图模式(URL): model=%s, size=%s, prompt=%s",
                         model, size, prompt[:80])
 
         return await self._post(url, body)
@@ -237,45 +240,78 @@ class AgnesAIClient:
         seed: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        创建视频生成异步任务，返回 {video_id, task_id, ...}
-        该方法异步等待创建响应，不会阻塞其他并发请求。
+        创建视频生成异步任务。
+
+        Agnes Video V2.0 当前文档使用 /videos/generations，并接收
+        aspect_ratio、duration、fps。前端仍保留帧数和宽高控制，这里在
+        BFF 层转换为官方参数，避免把旧字段透传给上游导致 422。
         """
-        url = f"{self.base_url}/videos"
+        url = f"{self.base_url}/video/generations"
+
+        aspect_ratio = self._aspect_ratio(width, height)
+        duration = max(1, round(num_frames / frame_rate))
 
         body = {
             "model": model,
             "prompt": prompt,
-            "num_frames": num_frames,
-            "frame_rate": frame_rate,
-            "width": width,
-            "height": height,
+            "aspect_ratio": aspect_ratio,
+            "duration": duration,
+            "fps": frame_rate,
         }
 
-        if negative_prompt:
-            body["negative_prompt"] = negative_prompt
         if seed is not None:
             body["seed"] = seed
 
-        # 图生视频模式：单张参考图放在顶层 image 字段
-        if mode == "image2video" and image:
-            body["image"] = image
+        # ── 图生视频模式 / 关键帧动画处理 ──
+        # Agnes Video V2.0 官方规范 (agnes-ai-docs.md / Agnes Video V2.0):
+        #   - 文生视频：不传 image/image_end（仅 prompt）
+        #   - 图生视频（单张）：extra_body.image = 起始帧图片 URL 或 Data URI Base64
+        #   - 图生视频（首尾帧）：extra_body.image + extra_body.image_end
+        #   - 纯 base64 字符串必须补全 Data URI 前缀（`data:image/png;base64,xxx`）
+        #
+        # 前端 image2video 模式：params.image = 单张参考图（base64 或 URL）
+        # 前端 keyframes 模式：params.images = 图片数组
+        # 统一处理逻辑：收集所有有效图片，第一张 → extra_body.image，第二张及以后 → extra_body.image_end（仅最后一张）
 
-        # 关键帧动画模式：多张图片和 mode 必须放在 extra_body 中
-        # Agnes AI API 要求关键帧的 image 数组和 mode 放在 extra_body 嵌套对象内，
-        # 放在顶层会导致 400 错误
-        # 注：图生图的 image 同样放在 extra_body.image 数组中（见 create_image 方法）
-        if mode == "keyframes" and images and len(images) > 0:
-            # 过滤空值/None，确保仅保留有效图片
-            valid_images = [img for img in images if img and isinstance(img, str) and img.strip()]
-            if valid_images:
-                body["extra_body"] = {
-                    "image": valid_images,   # 关键帧图片数组
-                    "mode": "keyframes",     # 显式声明关键帧模式
-                }
+        # 收集有效图片（从 image 字段和 images 数组）
+        ref_images_all = []
+        if image and image.strip():
+            ref_images_all.append(image.strip())
+        if images and len(images) > 0:
+            for img in images:
+                if img and isinstance(img, str) and img.strip():
+                    ref_images_all.append(img.strip())
+
+        if ref_images_all and len(ref_images_all) > 0:
+            # 对每个参考图进行归一化处理，统一补全 Data URI 前缀或保留原格式：
+            #   - 已经是完整 Data URI（data:image/xxx;base64,xxx）→ 直接使用
+            #   - 公网 URL（http:// / https://）→ 直接使用
+            #   - 纯 base64 字符串 → 补全 Data URI 前缀（默认 image/png）
+            normalized = []
+            for img in ref_images_all:
+                lowered = img.strip().lower()
+                if lowered.startswith("data:"):
+                    normalized.append(img.strip())  # 完整 Data URI，直接使用
+                elif lowered.startswith("http://") or lowered.startswith("https://"):
+                    normalized.append(img.strip())  # 公网 URL
+                else:
+                    # 纯 base64 → 补上 Data URI 前缀（image/png 兼容性最好）
+                    normalized.append(f"data:image/png;base64,{img.strip()}")
+
+            # 根据图片张数构造 extra_body（同时传顶层 image/image_end 兼容文档参数表和 curl 示例）：
+            #   - 1 张：extra_body = {"image": 第一张} （图生视频，单张起始帧）
+            #   - 2+ 张：extra_body = {"image": 第一张, "image_end": 最后一张} （首尾帧图生视频）
+            body["extra_body"] = {"image": normalized[0]}
+            if len(normalized) >= 2:
+                body["extra_body"]["image_end"] = normalized[-1]
+            # 同时在顶层也放一份 image 以兼容参数表写法
+            body["image"] = normalized[0]
+            if len(normalized) >= 2:
+                body["image_end"] = normalized[-1]
 
         logger.info(
             f"[视频生成] 创建任务: prompt={prompt[:60]}...  "
-            f"mode={mode}  frames={num_frames}  resolution={width}x{height}"
+            f"mode={mode}  duration={duration}s  aspect_ratio={aspect_ratio}  fps={frame_rate}"
         )
         return await self._post(url, body)
 
@@ -285,7 +321,7 @@ class AgnesAIClient:
     ) -> Dict[str, Any]:
         """
         查询视频任务状态。优先使用 video_id 走 agnesapi 路径，
-        否则回退到 /videos/{task_id}。
+        否则回退到 /videos/generations/{task_id}。
         """
         if video_id:
             try:
@@ -299,31 +335,67 @@ class AgnesAIClient:
 
         if task_id:
             try:
-                data = await self._get(f"{self.base_url}/videos/{task_id}")
+                data = await self._get(f"{self.base_url}/video/generations/{task_id}")
                 return self._normalize_video_status(data)
             except Exception as e:
                 raise RuntimeError(f"视频状态查询失败: {e}") from e
 
         raise RuntimeError("缺少 video_id 和 task_id，无法轮询视频状态")
 
+    @staticmethod
+    def _aspect_ratio(width: int, height: int) -> str:
+        """
+        将前端宽高转换为 Agnes Video 文档要求的 aspect_ratio 字符串。
+        常见比例保持为标准写法，其他比例用最大公约数约分。
+        """
+        import math
+
+        if width <= 0 or height <= 0:
+            return "16:9"
+
+        ratio = width / height
+        common = {
+            "16:9": 16 / 9,
+            "9:16": 9 / 16,
+            "1:1": 1,
+            "4:3": 4 / 3,
+            "3:4": 3 / 4,
+            "3:2": 3 / 2,
+            "2:3": 2 / 3,
+        }
+        closest, value = min(common.items(), key=lambda item: abs(item[1] - ratio))
+        if abs(value - ratio) < 0.03:
+            return closest
+
+        divisor = math.gcd(width, height)
+        return f"{width // divisor}:{height // divisor}"
+
     # ---------- 标准化视频状态 ----------
     def _normalize_video_status(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         将 Agnes AI 的视频状态响应标准化，便于上层业务逻辑处理。
         """
+        first_item = None
+        if isinstance(data.get("data"), list) and data["data"]:
+            first_item = data["data"][0]
+        elif isinstance(data.get("data"), dict):
+            first_item = data["data"]
+
         raw_status = (
             data.get("status")
-            or (isinstance(data.get("data"), dict) and data["data"].get("status"))
+            or (isinstance(first_item, dict) and first_item.get("status"))
             or data.get("state")
-            or (isinstance(data.get("data"), dict) and data["data"].get("state"))
+            or (isinstance(first_item, dict) and first_item.get("state"))
             or "unknown"
         )
 
         status = str(raw_status).lower()
+        if status == "succeeded":
+            status = "success"
+        elif status in ("pending", "queued", "running"):
+            status = "processing"
 
-        if data.get("video_url") or (
-            isinstance(data.get("data"), dict) and data["data"].get("video_url")
-        ):
+        if data.get("video_url") or (isinstance(first_item, dict) and first_item.get("url")):
             if status not in ("completed", "success"):
                 status = "completed"
 
@@ -332,15 +404,10 @@ class AgnesAIClient:
         video_url = (
             data.get("video_url")
             or data.get("remixed_from_video_id")  # Agnes API 实际使用的字段
-            or (isinstance(data.get("data"), dict) and data["data"].get("video_url"))
-            or (isinstance(data.get("data"), dict) and data["data"].get("remixed_from_video_id"))
-            or (isinstance(data.get("data"), dict) and data["data"].get("url"))
+            or (isinstance(first_item, dict) and first_item.get("video_url"))
+            or (isinstance(first_item, dict) and first_item.get("remixed_from_video_id"))
+            or (isinstance(first_item, dict) and first_item.get("url"))
             or data.get("url")
-            or (
-                isinstance(data.get("data"), list)
-                and len(data.get("data", [])) > 0
-                and data["data"][0].get("url")
-            )
             or None
         )
 
@@ -356,6 +423,8 @@ class AgnesAIClient:
         if status in ("failed", "error"):
             error_msg = (
                 (isinstance(data.get("error"), dict) and data["error"].get("message"))
+                or (isinstance(first_item, dict) and isinstance(first_item.get("error"), dict) and first_item["error"].get("message"))
+                or (isinstance(first_item, dict) and first_item.get("error"))
                 or data.get("error_message")
                 or data.get("message")
                 or "未知错误"

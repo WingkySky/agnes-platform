@@ -20,6 +20,9 @@ class ImageGenerationRequest(BaseModel):
     response_format: str = Field(default="url", description="响应格式: url 或 b64_json")
     quality: Optional[str] = Field(default="standard", description="图片质量 (standard/hd)")
 
+    # ── 前端兼容字段：mode（自动转换为 is_image_to_image） ──
+    mode: Optional[str] = Field(default=None, description="【前端兼容】'text2image' 或 'image2image'")
+
     # ── 新字段：多图参考（推荐使用） ──
     base64_images: Optional[List[str]] = Field(
         default=None,
@@ -66,7 +69,12 @@ class ImageGenerationRequest(BaseModel):
 
     @property
     def is_image_to_image(self) -> bool:
-        """是否为图生图（只要有任何参考图即判定为 yes）"""
+        """是否为图生图（参考图存在 或 mode 显式为 image2image）"""
+        if self.mode:
+            if self.mode == "image2image" and len(self.all_reference_images) > 0:
+                return True
+            if self.mode == "text2image":
+                return False
         return len(self.all_reference_images) > 0
 
     @field_validator("prompt")
